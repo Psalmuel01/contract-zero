@@ -39,7 +39,13 @@ function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; 
     // origin, which hid every container in the level whenever the origin was off-screen.
     m.computeBoundingBox();
     m.computeBoundingSphere();
-  }, [items]);
+    // `material` and `geometry` are deps because they are the mesh's constructor
+    // args: when Auto quality steps down mid-mission the texture tier changes, the
+    // materials are rebuilt, React constructs a NEW InstancedMesh, and a new one
+    // starts with every instance at the origin. Keyed on `items` alone, the whole
+    // site collapsed into one point and vanished on any device that could not hold
+    // its frame rate.
+  }, [items, material, geometry]);
   if (!items.length) return null;
   return (
     <instancedMesh ref={ref} args={[geometry ?? UNIT, material, items.length]} castShadow={cast} receiveShadow />

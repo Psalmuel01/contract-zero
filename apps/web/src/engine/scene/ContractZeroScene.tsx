@@ -1572,6 +1572,25 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       scene.traverse((o) => { if ((o as THREE.Light).isLight && o.castShadow) casting++; });
       return { pixelRatio: gl.getPixelRatio(), shadowCasters: casting, ...tierRef.current };
     };
+    // Which instanced meshes the camera's frustum keeps, with their bounds (culling checks).
+    w.__czCull = () => {
+      const f = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      const out: { n: number; c: number[]; r: number; spread: number; inView: boolean; visible: boolean }[] = [];
+      scene.traverse((o) => {
+        const m = o as THREE.InstancedMesh;
+        if (!m.isInstancedMesh) return;
+        const s = m.boundingSphere?.clone().applyMatrix4(m.matrixWorld);
+        let shown = true;
+        for (let p: THREE.Object3D | null = m; p; p = p.parent) if (!p.visible) shown = false;
+        // How far apart the instances really stand (from their matrices, not the bounds).
+        const a = m.instanceMatrix.array;
+        let spread = 0;
+        for (let i = 1; i < m.count; i++) spread = Math.max(spread, Math.hypot(a[i * 16 + 12] - a[12], a[i * 16 + 14] - a[14]));
+        out.push({ n: m.count, c: s ? s.center.toArray().map((v) => +v.toFixed(1)) : [], r: s ? +s.radius.toFixed(1) : -1, spread: +spread.toFixed(1), inView: s ? f.intersectsSphere(s) : true, visible: shown });
+      });
+      const cam = camera as THREE.PerspectiveCamera;
+      return { near: cam.near, far: cam.far, meshes: out };
+    };
     // audition any presence line (also lets us verify which ids have a recording)
     w.__czVo = (id: string, speaker: Speaker) => audio.vo(id, speaker);
     w.__czAudio = audio; // probes: levels(), stats(), and driving sounds from a headless run
@@ -1619,7 +1638,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       delete w.__czState; delete w.__czKillAll; delete w.__czKillRoom; delete w.__czKillPlayer; delete w.__czAim; delete w.__czAudio;
       delete w.__czMission; delete w.__czEndless; delete w.__czWarp; delete w.__czSkipBriefing; delete w.__czFloor;
       delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czToggle;
-      delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats;
+      delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats; delete w.__czCull;
     };
   }, [sim, audio]);
 
