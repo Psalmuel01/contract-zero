@@ -22,6 +22,7 @@ import { supplySlots, TABLE_VIEW, type TableConvoy, type TableFacility, type Tab
 import type { ResourceName } from '@/lib/api'
 import { usePageVisible } from '@/lib/usePageVisible'
 import type { FacilityStatus, Tone } from './WarTable'
+import { sceneAt, type ProcurementScene } from '@/lib/presenter/procurementScene'
 
 /** Schematic table units (the 2D view box) to metres on the sand table. */
 const K = 1 / 20
@@ -342,21 +343,106 @@ function Convoy({ c, roadY }: { c: TableConvoy; roadY: number }) {
   )
 }
 
+// ── A supply order, played on the table ─────────────────────────────────────
+
+const MERCHANT_HEX: Record<string, string> = { vex: '#f0a03c', halcyon: '#e8e4dc' }
+
+/** An arc over the relief from a merchant to the faction that asked: dashed while it is an
+ *  offer, a bright tube once that merchant has filled the order. A crate rides a winning
+ *  arc only when something was really delivered. */
+function Arc({ from, to, color, won, crate, reverse, reduce }: { from: [number, number]; to: [number, number]; color: string; won: boolean; crate: boolean; /** Goods flow faction to merchant (a surplus sale). */ reverse: boolean; reduce: boolean }) {
+  const curve = useMemo(() => {
+    const a = new THREE.Vector3(from[0], 0.7, from[1]), b = new THREE.Vector3(to[0], 0.7, to[1])
+    const mid = a.clone().lerp(b, 0.5); mid.y = 3.2 + a.distanceTo(b) * 0.12
+    return new THREE.QuadraticBezierCurve3(a, mid, b)
+  }, [from, to])
+  const dashed = useMemo(() => {
+    const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(48)), new THREE.LineDashedMaterial({ color, dashSize: 0.35, gapSize: 0.25, transparent: true, opacity: 0.9 }))
+    l.computeLineDistances()
+    return l
+  }, [curve, color])
+  const tube = useMemo(() => new THREE.TubeGeometry(curve, 48, 0.07, 6), [curve])
+  useEffect(() => () => { dashed.geometry.dispose(); (dashed.material as THREE.Material).dispose(); tube.dispose() }, [dashed, tube])
+  const box = useRef<THREE.Mesh>(null)
+  useFrame((st) => {
+    if (!box.current) return
+    const t = reduce ? 1 : (st.clock.elapsedTime % 2.4) / 2.4
+    box.current.position.copy(curve.getPoint(reverse ? 1 - t : t))
+  })
+  return (
+    <group>
+      {won ? <mesh geometry={tube}><meshBasicMaterial color={color} transparent opacity={0.95} /></mesh> : <primitive object={dashed} />}
+      {crate && <mesh ref={box} castShadow><boxGeometry args={[0.32, 0.26, 0.26]} /><meshStandardMaterial color={color} roughness={0.6} emissive={color} emissiveIntensity={0.25} /></mesh>}
+    </group>
+  )
+}
+
+/** The order going up over the faction that placed it: a column of light. */
+function OrderBeam({ at, reduce }: { at: [number, number]; reduce: boolean }) {
+  const mat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#f0a03c', transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending }), [])
+  useFrame((st) => { mat.opacity = reduce ? 0.35 : 0.22 + 0.16 * Math.sin(st.clock.elapsedTime * 2.4) })
+  useEffect(() => () => mat.dispose(), [mat])
+  return <mesh position={[at[0], 2.6, at[1]]} material={mat}><cylinderGeometry args={[0.35, 0.9, 5, 20, 1, true]} /></mesh>
+}
+
+/** A shortage flaring at the faction's sites. */
+function Flare({ at, reduce }: { at: [number, number]; reduce: boolean }) {
+  const ref = useRef<THREE.Mesh>(null)
+  const mat = useMemo(() => new THREE.MeshBasicMaterial({ color: '#e5484d', transparent: true, opacity: 0.6, depthWrite: false }), [])
+  useFrame((st) => {
+    if (!ref.current) return
+    const k = reduce ? 0.6 : (st.clock.elapsedTime * 0.6) % 1
+    ref.current.scale.setScalar(1 + k * 1.6)
+    mat.opacity = reduce ? 0.5 : 0.7 * (1 - k)
+  })
+  useEffect(() => () => mat.dispose(), [mat])
+  return <mesh ref={ref} rotation={[-Math.PI / 2, 0, 0]} position={[at[0], 0.32, at[1]]} material={mat}><ringGeometry args={[1.8, 2.05, 48]} /></mesh>
+}
+
+function StoryLayer({ model, story, reduce }: { model: TableModel; story: { scene: ProcurementScene; beat: number }; reduce: boolean }) {
+  const s = story.scene
+  const on = sceneAt(s, story.beat)
+  const mine = model.facilities.filter((f) => f.owner === s.requester).map((f) => toTable(f.pos))
+  const anchor = model.territories.find((t) => t.owner === s.requester)?.anchor
+  if (!anchor || !mine.length) return null
+  const to = toTable(anchor)
+  const merchantAt = (id: string) => { const f = model.facilities.find((x) => x.id === `exchange:${id}`); return f ? toTable(f.pos) : null }
+  return (
+    <group>
+      {on.flare && mine.map((p, i) => <Flare key={i} at={p} reduce={reduce} />)}
+      {on.order && <OrderBeam at={to} reduce={reduce} />}
+      {on.arcs.map((m) => {
+        const from = merchantAt(m)
+        if (!from) return null
+        const won = on.won.includes(m)
+        return <Arc key={m} from={from} to={to} color={MERCHANT_HEX[m] ?? '#8d929a'} won={won} crate={won && on.crate} reverse={s.side === 'sell'} reduce={reduce} />
+      })}
+    </group>
+  )
+}
+
 // ── Camera ──────────────────────────────────────────────────────────────────
 
 const HOME = { pos: new THREE.Vector3(0, 23, 21), look: new THREE.Vector3(0, 0, 1.2) }
 
 /** Glides to the selected facility (snaps under Reduce motion); a slow drift otherwise. */
-function Rig({ focus, reduce }: { focus: [number, number] | null; reduce: boolean }) {
+function Rig({ focus, frame, reduce }: { focus: [number, number] | null; /** Frame these points instead (an order playing). */ frame: [number, number][] | null; reduce: boolean }) {
   const { camera, size } = useThree()
   const look = useRef(HOME.look.clone())
   const narrow = size.width < 640
   useFrame((st, dt) => {
     const back = narrow ? 1.3 : 1
-    const goalLook = focus ? new THREE.Vector3(focus[0] * 0.8, 0, focus[1] * 0.8 + 0.6) : HOME.look
-    const goalPos = focus
+    let goalLook = focus ? new THREE.Vector3(focus[0] * 0.8, 0, focus[1] * 0.8 + 0.6) : HOME.look
+    let goalPos = focus
       ? new THREE.Vector3(focus[0] * 0.8, 13 * back, focus[1] * 0.8 + 12.5 * back)
       : HOME.pos.clone().multiplyScalar(back)
+    if (frame && frame.length) {
+      const cx = frame.reduce((a, p) => a + p[0], 0) / frame.length, cz = frame.reduce((a, p) => a + p[1], 0) / frame.length
+      const span = Math.max(8, ...frame.map((p) => Math.hypot(p[0] - cx, p[1] - cz) * 2))
+      const d = Math.min(1, 0.45 + span / 40)
+      goalLook = new THREE.Vector3(cx * 0.7, 0, cz * 0.7 + 1)
+      goalPos = new THREE.Vector3(cx * 0.7, HOME.pos.y * d * back, cz * 0.7 + HOME.pos.z * d * back)
+    }
     if (!reduce) goalPos.x += Math.sin(st.clock.elapsedTime * 0.08) * 0.6
     const k = reduce ? 1 : 1 - Math.exp(-dt * 2.2)
     camera.position.lerp(goalPos, k)
@@ -366,7 +452,7 @@ function Rig({ focus, reduce }: { focus: [number, number] | null; reduce: boolea
   return null
 }
 
-export default function WarTable3D({ model, status, selectedId, focusId, onSelect, tick, supply, reduce }: {
+export default function WarTable3D({ model, status, selectedId, focusId, onSelect, tick, supply, reduce, story, overlay }: {
   model: TableModel; status: Record<string, FacilityStatus>; selectedId: string | null
   /** The facility the player picked: the camera only moves for a real choice. */
   focusId: string | null
@@ -374,9 +460,17 @@ export default function WarTable3D({ model, status, selectedId, focusId, onSelec
   /** The selected facility's owner's stock against target, by resource. */
   supply: FacilitySupply[] | undefined
   reduce: boolean
+  /** A supply order being played on the table, and the beat it has reached. */
+  story?: { scene: ProcurementScene; beat: number } | null
+  /** Interface laid over the table (the order card). */
+  overlay?: React.ReactNode
 }) {
   const visible = usePageVisible()
   const picked = model.facilities.find((f) => f.id === focusId)
+  // while an order plays, frame the faction that asked and every merchant that answered
+  const storyFrame = story ? [
+    ...model.facilities.filter((f) => f.owner === story.scene.requester || story.scene.offered.includes(f.owner)).map((f) => toTable(f.pos)),
+  ] : null
   const focus = picked ? toTable(picked.pos) : null
   const roadY = 0.2
   return (
@@ -402,8 +496,10 @@ export default function WarTable3D({ model, status, selectedId, focusId, onSelec
         ))}
         {model.convoys.filter((c) => c.state === 'in_transit' || c.state === 'seized').map((c) => <Convoy key={c.id} c={c} roadY={roadY} />)}
         <OffMap at={toTable(model.offMap)} />
-        <Rig focus={focus} reduce={reduce} />
+        {story && <StoryLayer model={model} story={story} reduce={reduce} />}
+        <Rig focus={focus} frame={storyFrame} reduce={reduce} />
       </Canvas>
+      {overlay}
       <div className="pointer-events-none absolute left-2 top-2 text-[11px] text-dim">Schematic relief · Day {Math.floor(tick / 24)}, {String(tick % 24).padStart(2, '0')}:00</div>
     </div>
   )

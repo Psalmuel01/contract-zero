@@ -38,6 +38,21 @@ for (const [name, vp] of [['desktop', { width: 1440, height: 900 }], ['phone', {
     check(await btn.first().getAttribute('aria-pressed') === 'true', `${name}: Cinder Yard selected from the list`)
     await box.screenshot({ path: `${out}/${name}-relief-cinder.jpg`, type: 'jpeg', quality: 85 })
   } else check(false, `${name}: Cinder Yard in the facility list`)
+  // play a real supply order on the table, beat by beat
+  const play = page.locator('[data-testid^="play-order-"]').first()
+  if (await play.count()) {
+    await play.click()
+    await page.waitForSelector('[data-testid="order-card"]', { timeout: 10000 })
+    check(true, `${name}: a supply order plays on the table with its card`)
+    for (const [i, wait] of [[1, 3800], [2, 3800], [3, 3800]]) {
+      await page.waitForTimeout(wait)
+      await box.screenshot({ path: `${out}/${name}-order-beat${i}.jpg`, type: 'jpeg', quality: 85 })
+    }
+    const card = await page.locator('[data-testid="order-card"]').innerText()
+    check(/Supply order #\d+/i.test(card) && /(competing offers|single offer|no offers)/i.test(card), `${name}: the card names the order and how many offers there really were`)
+    await page.getByTestId('order-card-close').click()
+    check(await page.locator('[data-testid="order-card"]').count() === 0, `${name}: the card closes`)
+  } else console.log(`SKIP ${name}: no supply orders recorded to play`)
   // the flat map still works
   await page.getByTestId('wt-view-flat').click()
   await page.waitForTimeout(800)

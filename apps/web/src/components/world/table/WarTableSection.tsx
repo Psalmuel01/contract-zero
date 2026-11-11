@@ -16,6 +16,7 @@ import { WarTable, type FacilityStatus, type Tone } from './WarTable'
 import { FacilityPanel } from './FacilityPanel'
 import { useSettings } from '@/lib/settings'
 import type { FacilitySupply } from './WarTable3D'
+import { OrderCard, OrderStrip, useOrderPlayer } from './OrderPlayer'
 
 // The relief is a WebGL scene: client-only, and loaded only when it is shown.
 const WarTable3D = dynamic(() => import('./WarTable3D'), { ssr: false, loading: () => <div className="aspect-[16/9] w-full animate-none bg-ink-2" aria-hidden /> })
@@ -35,6 +36,8 @@ export function WarTableSection({ war, market }: { war: WarRoomView; market: Mar
   const decisions = useQuery({ queryKey: ['decisions', 40], queryFn: () => api.decisions(40), refetchInterval: 15_000 })
   const [picked, setPicked] = useState<string | null>(null)
   const settings = useSettings()
+  const procurement = useQuery({ queryKey: ['procurement'], queryFn: () => api.procurement(10), refetchInterval: 10_000 })
+  const player = useOrderPlayer(procurement.data, settings.access.reduceMotion)
   // Relief by default where WebGL exists and the player hasn't chosen the flat map; Low
   // graphics starts on the flat map. The choice is remembered on this device.
   const [view, setView] = useState<'relief' | 'flat' | null>(null)
@@ -91,7 +94,8 @@ export function WarTableSection({ war, market }: { war: WarRoomView; market: Mar
           </div>
         </div>
         {view === 'relief'
-          ? <WarTable3D model={model} status={status} selectedId={selectedId} focusId={picked} onSelect={setPicked} tick={war.world.tick} supply={supply} reduce={settings.access.reduceMotion} />
+          ? <WarTable3D model={model} status={status} selectedId={selectedId} focusId={picked} onSelect={setPicked} tick={war.world.tick} supply={supply} reduce={settings.access.reduceMotion}
+              story={player.story} overlay={player.story && <OrderCard story={player.story} onStep={player.step} onStop={player.stop} />} />
           : view === 'flat' && (
             <div className="overflow-x-auto" tabIndex={-1}>
               <WarTable model={model} status={status} selectedId={selectedId} onSelect={setPicked} tick={war.world.tick} />
@@ -106,6 +110,7 @@ export function WarTableSection({ war, market }: { war: WarRoomView; market: Mar
             </button>
           ))}
         </div>
+        {view === 'relief' && <OrderStrip scenes={player.scenes} playing={player.story?.scene.order ?? null} onPlay={player.play} />}
         <p className="mt-2 text-xs text-dim">{view === 'relief'
           ? <>Select a facility on the table or from the list. The ring on the ground is its holder&apos;s readiness; a red beacon means a production line is down; trucks on the road are shipments placed at the server&apos;s own progress; the selected facility&apos;s holder&apos;s real stock stands beside it (six slots per resource, filled by stock over target).</>
           : <>Select a facility on the map or from the list. Rings show faction readiness; a triangle means a production line is down; the number is contracts on offer; a diamond on the road is a shipment placed from the server&apos;s own arrival times.</>}</p>
