@@ -32,6 +32,10 @@ import { OperatorRig, type OperatorApi } from './OperatorRig';
 import { LEVELS } from '../fps/levels';
 import { groundHeight, railedMove } from '../fps/decks';
 import { LevelArt } from './LevelArt';
+import { SiteDressing, SiteSky } from './SiteDressing';
+import { gradeTheme, type Phase as SitePhase } from './siteLook';
+/** Where the sun sits over a structured site (matches the key light's offset below). */
+const SITE_SUN = new THREE.Vector3(22, 34, 26);
 import { FieldProps } from './FieldProps';
 import { ItemInspector } from '@/components/inspect/ItemInspector';
 import type { InspectItem } from '@/components/inspect/itemInfo';
@@ -749,7 +753,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     () => [...mission.walls, ...mission.cover, ...dressingColliders(DRESSING)],
     [mission, DRESSING],
   );
-  const theme = themeForMission(mission);
+  // A structured site grades the hour's light toward its own air (siteLook): the hour
+  // says how bright it is, the site says what the air is like.
+  const sitePhase: SitePhase = mission.conditions?.phase ?? (mission.zone === 'BLACKSITE' ? 'night' : mission.zone === 'REDYARD' ? 'dusk' : 'day');
+  const theme = useMemo(() => (LEVEL ? gradeTheme(themeForMission(mission), LEVEL.id, sitePhase) : themeForMission(mission)), [mission, LEVEL, sitePhase]);
   const isFinale = !endless && mission.id === CAMPAIGN[CAMPAIGN.length - 1].id;
   const survival = !!mission.survival;
   const blackout = !!mission.blackout; // the Rift with NVG jammed — fight by muzzle-flash
@@ -1570,7 +1577,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     w.__czRender = () => {
       let casting = 0;
       scene.traverse((o) => { if ((o as THREE.Light).isLight && o.castShadow) casting++; });
-      return { pixelRatio: gl.getPixelRatio(), shadowCasters: casting, ...tierRef.current };
+      const fog = scene.fog as THREE.Fog | null;
+      return { pixelRatio: gl.getPixelRatio(), shadowCasters: casting, fog: fog ? { color: `#${fog.color.getHexString()}`, near: fog.near, far: fog.far } : null, ...tierRef.current };
     };
     // Which instanced meshes the camera's frustum keeps, with their bounds (culling checks).
     w.__czCull = () => {
@@ -3688,7 +3696,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     <>
       <color attach="background" args={[theme.bg]} />
       <fog attach="fog" args={theme.fog} />
-      <SkyDome top={theme.sky.top} bottom={theme.sky.bottom} />
+      {LEVEL
+        ? <SiteSky theme={theme} phase={sitePhase} level={LEVEL} sunDir={SITE_SUN} frozen={!!settingsRef?.current.access.reduceMotion} />
+        : <SkyDome top={theme.sky.top} bottom={theme.sky.bottom} />}
 
       {/* low ash-lit sun + cold fill, then restrained practicals so darkness has
           shape. Point-light intensity is in physical units: single digits, not tens. */}
@@ -3750,7 +3760,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           off the FRONT of this list, which shifts every later index and would make
           React re-render every wall in the world on each room advance — a hitch per
           doorway. Keyed this way, the walls that didn't change keep their identity. */}
-      {LEVEL && <LevelArt level={LEVEL} cues={mission.cues} minimal={minimal} colourOnly={colourOnly} lit={mission.zone !== 'DUSTLINE'} night={mission.conditions ? mission.conditions.phase === 'night' : undefined} calm={settingsRef?.current.access.reduceFlashes} />}
+      {LEVEL && <LevelArt level={LEVEL} cues={mission.cues} minimal={minimal} colourOnly={colourOnly} lit={mission.zone !== 'DUSTLINE'} night={mission.conditions ? mission.conditions.phase === 'night' : undefined} calm={settingsRef?.current.access.reduceFlashes} terrain={false} />}
+      {LEVEL && <SiteDressing level={LEVEL} theme={theme} phase={sitePhase} holder={mission.site?.holder ?? null} minimal={minimal} frozen={!!settingsRef?.current.access.reduceMotion} particles={plan.particles} />}
       {!LEVEL && LEVEL_WALLS.map((c, i) => (
         <group key={`w${c.x}_${c.z}_${c.w}_${c.d}`}>
           {/* Every wall SHARES one unit cube and is scaled to size. Authoring a fresh

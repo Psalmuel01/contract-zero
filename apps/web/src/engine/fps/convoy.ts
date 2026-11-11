@@ -245,8 +245,14 @@ function shell(c: ConvoyContract, st: Setting, gun: GunId, kind: OpKind) {
     reserveMags: 3,
     medkits: 1,
     conditions: { phase: st.cond.phase, engageRange: st.cond.sight_m, enemyAccuracy: st.cond.accuracy_bp / 10_000 },
-    site: { id: st.site?.id ?? st.lv.id, name: st.place, facility: st.site?.facility ?? '', exfil: st.site?.exfil ?? '' },
+    site: { id: st.site?.id ?? st.lv.id, name: st.place, facility: st.site?.facility ?? '', exfil: st.site?.exfil ?? '', holder: st.site?.owner ?? holderOf(c.target) },
   };
+}
+
+/** A faction id from what a contract calls its target ('vanguard', 'Vanguard', 'Ashen Compact'). */
+export function holderOf(target: string | undefined): string | undefined {
+  const t = (target ?? '').toLowerCase();
+  return ['vanguard', 'ashen', 'vex', 'halcyon'].find((id) => t.startsWith(id));
 }
 
 const cinder = (st: Setting) => st.lv.id === 'cinder_yard';

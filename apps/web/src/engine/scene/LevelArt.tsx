@@ -225,7 +225,7 @@ function DeliveryBeacon({ x, z, y }: { x: number; z: number; y: number }) {
   );
 }
 
-export function LevelArt({ level, minimal = false, colourOnly = false, lit = true, night: nightProp, calm = false, cues }: { level: LevelDef; minimal?: boolean; /** Load colour maps only (touch and minimal tiers). */ colourOnly?: boolean; lit?: boolean; night?: boolean; calm?: boolean; /** What the site's economy is doing (lines down, deliveries). */ cues?: WorldCues | null }) {
+export function LevelArt({ level, minimal = false, colourOnly = false, lit = true, night: nightProp, calm = false, cues, terrain = true }: { level: LevelDef; minimal?: boolean; /** Draw the old ring of ridges (the site layer draws its own terrain). */ terrain?: boolean; /** Load colour maps only (touch and minimal tiers). */ colourOnly?: boolean; lit?: boolean; night?: boolean; calm?: boolean; /** What the site's economy is doing (lines down, deliveries). */ cues?: WorldCues | null }) {
   // What the economy says is down or arriving: shown, never invented.
   const idle = useMemo(() => idleProps(level, cues), [level, cues]);
   const delivering = isDelivering(cues);
@@ -533,7 +533,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
 
   return (
     <group>
-      <Mountains color={night ? '#0b1220' : level.id === 'cinder_yard' ? '#4a3426' : '#5a3f30'} />
+      {terrain && <Mountains color={night ? '#0b1220' : level.id === 'cinder_yard' ? '#4a3426' : '#5a3f30'} />}
       {Object.entries(parts).map(([k, items]) =>
         k === 'tankCyl' ? <Instanced key={k} items={items} material={mats.tank} geometry={CYL} cast={cast} />
         : k === 'pipeCyl' ? <Instanced key={k} items={items} material={mats.pipe} geometry={CYL} cast={cast} />

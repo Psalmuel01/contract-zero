@@ -81,7 +81,7 @@ export interface Mission {
   /** What the hour does: guard reach and accuracy, and the phase for the HUD. */
   conditions?: { phase: 'day' | 'dusk' | 'night'; engageRange: number; enemyAccuracy: number };
   /** Where it is, for the HUD and the briefing. */
-  site?: { id: string; name: string; facility: string; exfil: string };
+  site?: { id: string; name: string; facility: string; exfil: string; /** The faction that holds the site (its marks are painted there). */ holder?: string };
 }
 
 /** Survival escalation: how many attackers and how tough, by 1-based wave. */

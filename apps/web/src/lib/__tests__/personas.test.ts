@@ -46,3 +46,15 @@ describe('personas', () => {
     expect(personaFor('nobody')).toBeUndefined()
   })
 })
+
+describe('faction paint', () => {
+  it('matches the colour tokens the interface uses, so a painted wall agrees with the War Table', async () => {
+    const { FACTION_PAINT } = await import('../factions')
+    const css = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
+    for (const [id, v] of Object.entries(FACTION_COLOR)) {
+      const token = v.match(/var\((--[\w-]+)\)/)![1]
+      const hex = css.match(new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})`))![1]
+      expect(FACTION_PAINT[id], id).toBe(hex.toLowerCase())
+    }
+  })
+})

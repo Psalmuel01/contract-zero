@@ -25,10 +25,12 @@ const errors = []
 for (const site of sites) for (const phase of phases) {
   const page = await browser.newPage({ viewport: { width: W, height: H } })
   page.on('pageerror', (e) => errors.push(`${site}/${phase}: ${e.message}`))
-  await page.addInitScript(() => {
+  await page.addInitScript((q) => {
+    // A fixed tier, so Auto stepping down under software rendering can't change the look mid-capture.
+    localStorage.setItem('cz_settings', JSON.stringify({ v: 3, quality: q }))
     localStorage.setItem('cz_welcome_seen', '1')
     localStorage.setItem('cz_tips_seen', JSON.stringify(['controls', 'loot', 'heal', 'cargo', 'extract', 'consequence']))
-  })
+  }, process.env.QUALITY ?? 'high')
   await page.goto(`${BASE}/dev/level?site=${site}&phase=${phase}&kind=raid&defense=2`, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(() => typeof window.__czWarp === 'function', null, { timeout: 180000 })
   await page.evaluate(() => { window.__czSkipBriefing(); window.__czKillAll?.() })
