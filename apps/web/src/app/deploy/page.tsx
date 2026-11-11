@@ -5,17 +5,21 @@ import Link from 'next/link'
 import { Rajdhani } from 'next/font/google'
 import { useSearchParams } from 'next/navigation'
 import { Suspense, useMemo, useState } from 'react'
-import { Briefing, Debrief } from '@/components/story/Briefing'
-import { ConsequenceTip } from '@/components/help/ConsequenceTip'
+import { Briefing } from '@/components/story/Briefing'
+import { GunStatBars } from '@/components/armory/GunStatBars'
+import { ScreenTip } from '@/components/help/ScreenTip'
 import type { MissionStory } from '@/engine/story/presence'
-import { Panel, Shell, Stat } from '@/components/ui/Shell'
+import { Panel, Shell } from '@/components/ui/Shell'
 import { buildOperationMission } from '@/engine/fps/convoy'
-import { GUN_CATALOG, gunDps, type GunId } from '@/engine/combat/GunStats'
+import { GUN_CATALOG, type GunId } from '@/engine/combat/GunStats'
 import type { ContractRunStats } from '@/engine/scene/ContractZeroScene'
 import { useQuery } from '@tanstack/react-query'
 import { useSession } from '@/lib/useSession'
-import { api, RESOURCE_LABEL, type OpKind, type BoardEntry, type MissionResult, type MissionStart, type ResourceName, type WorldView } from '@/lib/api'
+import { api, RESOURCE_LABEL, type OpKind, type MissionResult, type MissionStart, type ResourceName, type WorldView } from '@/lib/api'
 import { OperationIntel } from '@/components/world/OperationIntel'
+import { ReadinessSummary, useReadinessData } from '@/components/world/Readiness'
+import { MissionResults } from '@/components/world/MissionResults'
+import { useMusicState } from '@/components/audio/AudioProvider'
 import { WorldClockPanel } from '@/components/world/WorldClock'
 import { MissionStream } from '@/lib/missionStream'
 import { ItemInspector } from '@/components/inspect/ItemInspector'
@@ -43,40 +47,8 @@ type Phase =
   | { kind: 'arming'; start: MissionStart; before: WorldView; story: MissionStory | null }
   | { kind: 'fighting'; start: MissionStart; before: WorldView; story: MissionStory | null }
   | { kind: 'reporting' }
-  | { kind: 'results'; result: MissionResult; before: WorldView; after: WorldView }
+  | { kind: 'results'; session: string; result: MissionResult; before: WorldView; after: WorldView }
   | { kind: 'error'; message: string }
-
-const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`
-
-function guardsLine(e?: BoardEntry) {
-  if (!e) return 'no depot (not worth raiding, or no fuel to stage it)'
-  const g = e.guards
-  return `${plural(g.hall.rifles + g.yard.rifles, "rifle")}, ${plural(g.hall.sidearms + g.yard.sidearms, "sidearm")}, ${g.reinforce_per_drop} reinforcements per wave, defense L${e.defense}`
-}
-
-/** Shows on-chain settlement only once it is confirmed (verified FINAL on NEAR). */
-function SettlementStatus({ opId }: { opId: string }) {
-  const q = useQuery({
-    queryKey: ['settlement', opId],
-    queryFn: () => api.settlement(opId),
-    refetchInterval: (query) => (query.state.data && ['confirmed', 'failed', 'compensated'].includes(query.state.data.status) ? false : 3000),
-  })
-  const s = q.data
-  if (!s || !s.settled_on_chain) {
-    if (s && (s.status === 'failed' || s.status === 'compensated')) {
-      return <p className="text-sm text-rose-400">On-chain settlement failed: {s.error}</p>
-    }
-    return <p className="text-sm text-slate-400">Settling on NEAR… ({s?.status ?? 'queued'}). Not settled until confirmed.</p>
-  }
-  return (
-    <p className="text-sm text-emerald-400">
-      Settled on NEAR testnet:{' '}
-      {s.explorer.map((url, i) => (
-        <a key={url} href={url} target="_blank" rel="noreferrer" className="underline">{s.tx_hashes[i].slice(0, 10)}…</a>
-      ))}
-    </p>
-  )
-}
 
 function Deploy() {
   const params = useSearchParams()
@@ -88,9 +60,13 @@ function Deploy() {
   const [gun, setGun] = useState<GunId>('assault_rifle')
   const armory = useQuery({ queryKey: ['armory', player], queryFn: () => api.exchange(player).then((e) => e.armory ?? []), enabled: !!player })
   const [phase, setPhase] = useState<Phase>({ kind: 'intel' })
+  // The score follows the flow: preparation up to the fight, the fight drives its own, results resolve it.
+  useMusicState(phase.kind === 'fighting' || phase.kind === 'reporting' || phase.kind === 'error' ? null : phase.kind === 'results' ? 'results' : 'prep')
   const [inspect, setInspect] = useState<InspectItem | null>(null)
   const world = useQuery({ queryKey: ['world'], queryFn: api.world, refetchInterval: 10_000, enabled: phase.kind === 'intel' })
   const entry = world.data?.board.find((b) => b.kind === kind && b.target === target && b.resource === resource)
+  const readiness = useReadinessData(phase.kind === 'intel')
+  const targetActor = entry ? readiness.actor(entry.target) : undefined
 
   const accept = async () => {
     if (!player) return
@@ -139,7 +115,7 @@ function Deploy() {
       const { result } = await api.completeMission(start.session, outcome, stats.kills, outcome === 'extracted' ? stats.record : undefined)
       // Give the world clock a moment so the agents' response is visible.
       const after = await api.world()
-      setPhase({ kind: 'results', result, before, after })
+      setPhase({ kind: 'results', session: start.session, result, before, after })
     } catch (e) {
       setPhase({ kind: 'error', message: (e as Error).message })
     }
@@ -158,7 +134,7 @@ function Deploy() {
       codename: `${kind.toUpperCase()} · ${target.toUpperCase()}`, location: start.mission.zone ?? 'DUSTLINE', time: '', source: 'authored', radio: {},
       briefing: [{ id: 'fallback', speaker: 'handler', text: `${start.mission.cargo.units} units of ${RESOURCE_LABEL[resource].toLowerCase()} at ${target}'s site. Get in, do the job, get out.` }],
     }
-    return <Briefing story={shown} pending={!story} actionLabel="Choose loadout" onDeploy={() => setPhase({ kind: 'loadout', start, before, story: shown })} />
+    return <Briefing story={shown} pending={!story} contract={start.mission} kind={kind} pay={(before.board?.find((b) => b.target === target && b.resource === resource && b.kind === kind)?.bounty?.amount ?? 0) + (kind === 'raid' ? before.board?.find((b) => b.target === target && b.resource === resource && b.kind === kind)?.market_value.bid ?? 0 : 0)} actionLabel="Choose loadout" onDeploy={() => setPhase({ kind: 'loadout', start, before, story: shown })} />
   }
 
   if (phase.kind === 'fighting' && mission) {
@@ -185,63 +161,16 @@ function Deploy() {
     )
   }
 
-  if (phase.kind === 'results') {
-    const { result, before, after } = phase
-    const vgBefore = before.actors.find((a) => a.id === result.target)
-    const vgAfter = after.actors.find((a) => a.id === result.target)
-    const nextBefore = before.board.find((b) => b.target === result.target && b.resource === result.resource)
-    const nextAfter = after.board.find((b) => b.target === result.target && b.resource === result.resource)
-    const won = result.outcome === 'extracted'
-    return (
-      <Shell title="Extraction Results" back={{ href: '/contracts', label: 'Contract Board' }}>
-        <Panel>
-          <div className={`text-2xl font-bold ${won ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {won ? (result.kind === 'sabotage' ? 'LINE DESTROYED' : result.kind === 'recovery' ? 'CARGO HANDED OVER' : 'CARGO EXTRACTED') : result.outcome === 'killed' ? 'KILLED IN ACTION · NOTHING SECURED' : 'RUN REJECTED'}
-          </div>
-          {result.reason && <p className="mt-1 text-sm text-amber-400">The server rejected the run: {result.reason}.</p>}
-          {result.settlement && <div className="mt-2"><SettlementStatus opId={result.settlement.op_id} /></div>}
-          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
-            <Stat label={result.kind === 'sabotage' ? 'Destroyed' : result.kind === 'recovery' ? 'Returned' : 'Extracted'} value={`${result.extracted_units} ${result.resource}`}
-              hint={result.kind === 'raid' && result.record ? `${result.record.secured.length} case${result.record.secured.length === 1 ? '' : 's'} carried out of ${result.manifest ?? '?'} units on site` : result.kind === 'sabotage' && result.record ? `${result.record.charges.length} charges set` : undefined} />
-            <Stat label="Bounty" value={`${result.bounty} cr`} />
-            <Stat label="Mission time" value={`${Math.round(result.elapsed_secs)} s`} hint={`minimum ${result.min_secs} s`} />
-            <Stat label="You now hold" value={`${result.player_holdings.cargo} ${result.resource}`} hint={`${result.player_holdings.credits} credits`} />
-          </div>
-        </Panel>
-        {won && <ConsequenceTip target={vgAfter?.name ?? result.target} />}
-        {result.debrief && result.debrief.length > 0 && (
-          <Panel title={result.codename ? `DEBRIEF · ${result.codename}` : 'DEBRIEF'} className="mt-4">
-            <Debrief lines={result.debrief} />
-          </Panel>
-        )}
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Panel title={`WHAT IT DID TO ${(vgAfter?.name ?? result.target).toUpperCase()}`}>
-            {vgBefore && vgAfter && (
-              <div className="grid grid-cols-3 gap-3">
-                {(['ammo', 'med', 'fuel'] as const).map((r) => (
-                  <Stat key={r} label={RESOURCE_LABEL[r]} value={`${vgBefore.holdings[r]} → ${vgAfter.holdings[r]}`} />
-                ))}
-              </div>
-            )}
-          </Panel>
-          <Panel title="THE NEXT RAID ON THIS DEPOT">
-            <p className="text-sm text-slate-400">Before: {guardsLine(nextBefore)}</p>
-            <p className="mt-1 text-sm text-slate-100">Now: {guardsLine(nextAfter)}</p>
-            <p className="mt-2 text-xs text-slate-500">The commander reacts on the next world tick; check the board again in a minute.</p>
-          </Panel>
-        </div>
-        <div className="mt-6 flex gap-3">
-          <Link href="/contracts" className="cz-btn cz-btn-primary px-5 py-2 text-sm">Back to the board</Link>
-          <Link href="/" className="cz-btn cz-btn-ghost px-5 py-2 text-sm">Hub</Link>
-        </div>
-      </Shell>
-    )
-  }
+  if (phase.kind === 'results') return <MissionResults result={phase.result} before={phase.before} after={phase.after} session={phase.session} />
 
   if (phase.kind === 'intel' || phase.kind === 'starting') {
     return (
       <Shell title="Contract Intel" back={{ href: '/contracts', label: 'Contract Board' }} wide>
         <div className="mb-4"><WorldClockPanel clock={world.data?.clock} compact /></div>
+        <ScreenTip tip="intel" title="Reading a contract">
+          <p>The sponsor pays for what is <b className="text-fog">taken</b>, so the target&apos;s stock matters twice: it sets what is worth carrying out and how well its guards are armed.</p>
+          <p>The readiness note on the target is its real stock turned into what you will meet: armed guards, reinforcements, and whether it can field a forward depot. Open “Exact figures” to see the numbers behind it.</p>
+        </ScreenTip>
         {world.isLoading && <Panel><p className="text-muted">Pulling the contract…</p></Panel>}
         {world.data && !entry && <Panel><p className="text-muted">This contract is no longer on the board. The world moved on: <Link href="/contracts" className="text-amber-hi">see what&apos;s open now</Link>.</p></Panel>}
         {entry && (
@@ -249,12 +178,17 @@ function Deploy() {
             contract={entry.mission}
             kind={kind}
             reward={{ fee: entry.bounty?.amount ?? 0, sponsor: entry.bounty?.sponsor_name, cargoValue: entry.market_value.bid }}
+            targetBrief={targetActor ? <ReadinessSummary a={targetActor} inbound={readiness.inbound(targetActor.id)} ammoForGuards={entry.guards.ammo_available} /> : undefined}
           />
         )}
-        <button onClick={accept} disabled={!entry || phase.kind === 'starting'} className="cz-btn cz-btn-primary mt-6 px-6 py-3" data-testid="accept-contract">
-          {phase.kind === 'starting' ? 'Locking in the contract…' : 'Accept and get briefed'}
-        </button>
-        <p className="mt-2 text-xs text-dim">Accepting locks this plan in and opens a 30-minute deployment window. You choose your weapon after the briefing.</p>
+        <div className="sticky bottom-0 z-20 -mx-4 mt-6 border-t border-line-strong bg-ink/95 px-4 py-3 backdrop-blur sm:-mx-0" data-testid="accept-bar">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+            <button onClick={accept} disabled={!entry || phase.kind === 'starting'} className="cz-btn cz-btn-primary px-6 py-3" data-testid="accept-contract">
+              {phase.kind === 'starting' ? 'Locking in the contract…' : 'Accept and get briefed'}
+            </button>
+            <p className="min-w-0 flex-1 text-xs text-dim">Accepting locks this plan in and opens a 30-minute deployment window. You choose your weapon after the briefing.</p>
+          </div>
+        </div>
       </Shell>
     )
   }
@@ -272,59 +206,52 @@ function Deploy() {
     return <Shell title="Deploy"><Panel><p className="text-muted">Reporting to command…</p></Panel></Shell>
   }
 
+  const gp = phase.start.mission.guards
+  const guardsIn = gp ? gp.hall.rifles + gp.hall.sidearms + gp.yard.rifles + gp.yard.sidearms : null
+  const owned = new Map((armory.data ?? []).map((a) => [a.id, a]))
+  const chosen = GUN_CATALOG[gun]
+  const Card = ({ id, tag, tagTone, disabled = false }: { id: GunId; tag: string; tagTone: string; disabled?: boolean }) => (
+    <button
+      onClick={() => !disabled && setGun(id)} disabled={disabled} aria-pressed={gun === id} data-testid={owned.has(id) ? `gear-${id}` : `issue-${id}`}
+      className={`border px-4 py-3 text-left ${gun === id ? 'border-amber bg-amber/10' : disabled ? 'border-line/60 opacity-60' : 'border-line hover:bg-panel-2'}`}
+    >
+      <div className="mb-1.5 flex items-baseline justify-between gap-2"><span className="font-display font-bold uppercase tracking-wider text-fog">{GUN_CATALOG[id]?.name ?? id}</span><span className={`text-[11px] font-semibold uppercase tracking-wider ${tagTone}`}>{tag}</span></div>
+      <GunStatBars gun={id} compact />
+    </button>
+  )
   return (
-    <Shell title="Armory · Loadout" back={{ href: '/contracts', label: 'Contract Board' }}>
-      <Panel title={`${(phase.start.mission.site?.name ?? target).toUpperCase()} · ${phase.start.mission.site?.facility?.toUpperCase() ?? RESOURCE_LABEL[resource].toUpperCase()}`}>
-        <div className="grid gap-4 md:grid-cols-[1fr_280px]">
-          <div className="grid gap-2">
-            {ISSUE.map((id) => {
-              const g = GUN_CATALOG[id]
-              return (
-                <button
-                  key={id}
-                  onClick={() => setGun(id)}
-                  className={`border px-4 py-3 text-left ${gun === id ? 'border-amber bg-amber/10' : 'border-line hover:bg-panel-2'}`}
-                >
-                  <div className="font-semibold text-slate-100">{g.name}</div>
-                  <div className="text-xs text-slate-500">damage {g.damage} · {g.fireRate} rpm · mag {g.magazine} · {Math.round(gunDps(g))} dps</div>
-                </button>
-              )
-            })}
-            <div className="cz-label mt-2 !text-[10px]">Owned gear</div>
-            {(armory.data ?? []).map((a) => {
-              const id = a.id as GunId
-              const g = GUN_CATALOG[id]
-              const owned = a.owned > 0
-              return (
-                <button
-                  key={a.id}
-                  onClick={() => owned && setGun(id)}
-                  disabled={!owned}
-                  data-testid={`gear-${a.id}`}
-                  className={`border px-4 py-3 text-left ${gun === id ? 'border-amber bg-amber/10' : owned ? 'border-line hover:bg-panel-2' : 'border-line/60 opacity-60'}`}
-                >
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="font-semibold text-slate-100">{a.title}</span>
-                    {owned ? <span className="text-xs font-semibold uppercase tracking-wider text-friendly">Owned{a.owned > 1 ? ` ×${a.owned}` : ''}</span> : <span className="text-xs text-muted">{a.price.toLocaleString()} cr at the Exchange</span>}
-                  </div>
-                  {g && <div className="text-xs text-slate-500">damage {g.damage} · {g.fireRate} rpm · mag {g.magazine} · {Math.round(gunDps(g))} dps</div>}
-                </button>
-              )
-            })}
-            <button className="cz-btn cz-btn-ghost self-start px-3 py-1 text-xs" data-testid="inspect-loadout" onClick={() => {
-              const a = (armory.data ?? []).find((x) => x.id === gun)
-              setInspect({ type: 'weapon', gun, status: a ? (a.owned > 0 ? 'owned' : 'locked') : 'standard', owned: a?.owned, price: a?.price ?? null })
-            }}>Inspect the selected weapon</button>
-            {inspect && <ItemInspector item={inspect} onClose={() => setInspect(null)} />}
-            <p className="text-xs text-slate-500">SMG and assault rifle are standard issue. Owned guns are tokens in your account; <Link href="/exchange" className="text-amber-hi hover:underline">Vex&apos;s armory</Link> sells them.</p>
-          </div>
-          <div className="h-56 border border-line" style={{ background: 'radial-gradient(ellipse at 50% 55%, #23272e 0%, #0e1013 70%)' }}><GunTurntable gunId={gun} className="h-full w-full" /></div>
+    <Shell title="Armory · Loadout" back={{ href: '/contracts', label: 'Contract Board' }} wide>
+      <div className="grid gap-4 lg:grid-cols-[1fr_26rem]" data-testid="loadout">
+        <div className="grid content-start gap-2">
+          <div className="cz-label !text-[10px]">Standard issue</div>
+          {ISSUE.map((id) => <Card key={id} id={id} tag="Issued" tagTone="text-steel" />)}
+          <div className="cz-label mt-2 !text-[10px]">Owned gear · tokens in your account</div>
+          {(armory.data ?? []).map((a) => {
+            const have = a.owned > 0
+            return <Card key={a.id} id={a.id as GunId} disabled={!have} tag={have ? `Owned${a.owned > 1 ? ` ×${a.owned}` : ''}` : `${a.price ?? ''} cr at Vex`} tagTone={have ? 'text-friendly' : 'text-muted'} />
+          })}
+          {armory.data?.length === 0 && <p className="text-sm text-muted">You own no gear yet.</p>}
+          <p className="text-xs text-dim">SMG and assault rifle are standard issue. <Link href="/exchange" className="text-amber-hi hover:underline">Vex&apos;s armory</Link> sells the rest; what you buy stays yours.</p>
         </div>
-      </Panel>
+        <aside className="cz-panel p-4 lg:sticky lg:top-4 lg:self-start" aria-label="Selected weapon">
+          <div className="h-56 border border-line" style={{ background: 'radial-gradient(ellipse at 50% 55%, #23272e 0%, #0e1013 70%)' }}><GunTurntable gunId={gun} className="h-full w-full" /></div>
+          <div className="mt-3 font-display text-2xl font-bold uppercase tracking-wide text-fog" data-testid="selected-gun">{chosen?.name ?? gun}</div>
+          <div className="mt-2"><GunStatBars gun={gun} /></div>
+          <p className="mt-2 text-[11px] text-dim">Each bar is measured against the best weapon in the game, with the real figure beside it.</p>
+          <button className="cz-btn cz-btn-ghost mt-3 px-3 py-1 text-xs" data-testid="inspect-loadout" onClick={() => {
+            const a = owned.get(gun)
+            setInspect({ type: 'weapon', gun, status: a ? (a.owned > 0 ? 'owned' : 'locked') : 'standard', owned: a?.owned, price: a?.price ?? null })
+          }}>Inspect the selected weapon</button>
+          {inspect && <ItemInspector item={inspect} onClose={() => setInspect(null)} />}
+          <div className="mt-3 border-t border-line pt-3 text-xs text-muted" data-testid="loadout-recap">Going in: <span className="text-fog">{phase.start.mission.site?.name ?? target}</span>{guardsIn != null ? <> · <span className="text-fog">{guardsIn} guards</span></> : null}. A sidearm and spare magazines come with any weapon.</div>
+        </aside>
+      </div>
       {phase.kind === 'loadout' && phase.error && <p className="mt-4 text-sm text-rose-400">Could not arm: {phase.error}</p>}
-      <button onClick={arm} disabled={phase.kind === 'arming'} className="cz-btn cz-btn-primary mt-6 px-6 py-3" data-testid="deploy">
-        {phase.kind === 'arming' ? 'Checking your gear…' : 'Deploy'}
-      </button>
+      <div className="sticky bottom-0 z-20 -mx-4 mt-6 border-t border-line-strong bg-ink/95 px-4 py-3 backdrop-blur sm:mx-0" data-testid="deploy-bar">
+        <button onClick={arm} disabled={phase.kind === 'arming'} className="cz-btn cz-btn-primary px-6 py-3" data-testid="deploy">
+          {phase.kind === 'arming' ? 'Checking your gear…' : `Deploy with ${chosen?.name ?? gun}`}
+        </button>
+      </div>
     </Shell>
   )
 }

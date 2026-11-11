@@ -10,78 +10,27 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Panel, Shell, Stat } from '@/components/ui/Shell'
 import { Procurement } from '@/components/market/Procurement'
+import { inboundFor, MerchantSummary, ReadinessSummary } from '@/components/world/Readiness'
+import { Operations } from '@/components/world/Operations'
+import { Tabs } from '@/components/ui/Tabs'
+import { ScreenTip } from '@/components/help/ScreenTip'
+import { AdvancedSwitch } from '@/components/help/AdvancedView'
+import { FactionDossier } from '@/components/world/FactionDossier'
+import { describeFaction } from '@/lib/presenter/economy'
+import { describeMerchant } from '@/lib/presenter/merchant'
+import { factionRemark, merchantRemark } from '@/lib/presenter/remarks'
+import { useMusicState } from '@/components/audio/AudioProvider'
+import { RadioFeed } from '@/components/audio/RadioFeed'
+import { WarTableSection } from '@/components/world/table/WarTableSection'
+import { FactionInsignia } from '@/components/ui/FactionInsignia'
 import { TradingPartners, useMarket } from '@/components/market/SupplyOrders'
-import { api, RESOURCE_LABEL, type CausalChain, type ChainTx, type ResourceName, type SimulationView, type WarActor, type WarConvoy, type WarContract, type WarRoomView } from '@/lib/api'
+import { api, RESOURCE_LABEL, type CausalChain, type MarketMerchant, type MarketOrder, type ChainTx, type ResourceName, type SimulationView, type WarActor, type WarRoomView } from '@/lib/api'
 
 const RES: ResourceName[] = ['ammo', 'med', 'fuel']
 const RES_COLOR: Record<ResourceName, string> = { ammo: 'var(--color-amber)', med: 'var(--color-friendly)', fuel: 'var(--color-steel)' }
 const ACTOR_COLOR: Record<string, string> = { vanguard: 'var(--color-steel)', ashen: 'var(--color-hostile)', vex: 'var(--color-amber)' }
 const color = (id: string) => ACTOR_COLOR[id] ?? 'var(--color-muted)'
 const clock = (tick: number) => `D${Math.floor(tick / 24)} ${String(tick % 24).padStart(2, '0')}:00`
-
-// ── regional map ──
-
-const SITES: Record<string, { x: number; y: number; label: string; sub: string }> = {
-  vanguard: { x: 150, y: 210, label: 'Dustline Depot', sub: 'Vanguard' },
-  ashen: { x: 610, y: 90, label: 'Ashen Refinery', sub: 'Ashen Compact' },
-  vex: { x: 420, y: 230, label: 'Vex Exchange', sub: 'Merchant' },
-  blacksite: { x: 230, y: 70, label: 'Blacksite', sub: 'Vanguard, night ops' },
-  outside: { x: 700, y: 300, label: 'Outer markets', sub: 'imports / exports' },
-}
-const ROUTES: [string, string][] = [['vanguard', 'vex'], ['ashen', 'vex'], ['outside', 'vex'], ['vanguard', 'blacksite']]
-
-function routeFor(c: WarConvoy): [string, string] {
-  // Merchant caravans come in from outside; a faction's shipments come home to its depot.
-  return c.owner === 'vex' ? ['outside', 'vex'] : ['vex', c.owner in SITES ? c.owner : 'vanguard']
-}
-
-function RegionMap({ v }: { v: WarRoomView }) {
-  const actors = Object.fromEntries(v.world.actors.map((a) => [a.id, a]))
-  const targeted = new Map<string, WarContract[]>()
-  for (const c of v.world.contracts) targeted.set(c.target, [...(targeted.get(c.target) ?? []), c])
-  return (
-    <svg viewBox="0 0 760 330" className="h-auto w-full" role="img" aria-label="Regional map: depots, the exchange, supply routes and convoys">
-      <defs>
-        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="var(--color-line)" strokeWidth="0.6" /></pattern>
-      </defs>
-      <rect width="760" height="330" fill="url(#grid)" opacity="0.6" />
-      {ROUTES.map(([a, b]) => (
-        <line key={a + b} x1={SITES[a].x} y1={SITES[a].y} x2={SITES[b].x} y2={SITES[b].y} stroke="var(--color-line-strong)" strokeWidth="2" strokeDasharray="6 6" />
-      ))}
-      {v.world.convoys.filter((c) => c.status.state === 'in_transit' || c.status.state === 'seized').map((c) => {
-        const [from, to] = routeFor(c)
-        const p = c.progress
-        const x = SITES[from].x + (SITES[to].x - SITES[from].x) * p
-        const y = SITES[from].y + (SITES[to].y - SITES[from].y) * p
-        const seized = c.status.state === 'seized'
-        return (
-          <g key={c.id}>
-            <circle cx={x} cy={y} r={seized ? 9 : 7} fill={seized ? 'var(--color-hostile)' : RES_COLOR[c.resource]} stroke="var(--color-ink)" strokeWidth="2">
-              <title>{`${c.owner_name} caravan #${c.id}: ${c.units} ${c.resource}, escort ${c.defense}${seized ? ` (seized by ${c.status.by})` : `, arrives ${clock(c.arrives_at)}`}`}</title>
-            </circle>
-            <text x={x} y={y - 12} textAnchor="middle" className="fill-fog font-display text-[11px] font-semibold">{c.units} {c.resource}{seized ? ' · SEIZED' : ''}</text>
-          </g>
-        )
-      })}
-      {Object.entries(SITES).map(([id, s]) => {
-        const a = actors[id === 'blacksite' ? '' : id]
-        const hits = targeted.get(id) ?? []
-        const down = a?.disrupted ?? []
-        return (
-          <g key={id}>
-            <rect x={s.x - 9} y={s.y - 9} width="18" height="18" transform={`rotate(45 ${s.x} ${s.y})`} fill="var(--color-panel-2)" stroke={id in ACTOR_COLOR ? color(id) : 'var(--color-dim)'} strokeWidth="2.5" />
-            {hits.length > 0 && <circle cx={s.x} cy={s.y} r="20" fill="none" stroke="var(--color-hostile)" strokeWidth="1.5" strokeDasharray="3 3"><title>{hits.map((h) => `${h.kind} contract: ${h.amount} cr from ${h.sponsor_name}`).join('\n')}</title></circle>}
-            <text x={s.x} y={s.y + 30} textAnchor="middle" className="fill-fog font-display text-[13px] font-bold uppercase tracking-wider">{s.label}</text>
-            <text x={s.x} y={s.y + 44} textAnchor="middle" className="fill-muted text-[11px]">
-              {s.sub}{a && a.kind === 'faction' ? ` · defense ${a.defense}` : ''}{hits.length ? ` · ${hits.length} contract${hits.length > 1 ? 's' : ''}` : ''}
-            </text>
-            {down.map((d, i) => <text key={d.resource} x={s.x} y={s.y + 58 + i * 13} textAnchor="middle" className="fill-hostile text-[11px] font-semibold">{d.resource} line down until {clock(d.until)}</text>)}
-          </g>
-        )
-      })}
-    </svg>
-  )
-}
 
 // ── charts ──
 
@@ -131,7 +80,14 @@ function Bar({ have, need, c }: { have: number; need: number; c: string }) {
   )
 }
 
-function ActorCard({ a, v }: { a: WarActor; v: WarRoomView }) {
+function dossierRemark(a: WarActor, v: WarRoomView, orders?: MarketOrder[], merchant?: MarketMerchant): string | undefined {
+  if (merchant) return merchantRemark(a.id, describeMerchant(merchant))
+  if (a.kind !== 'faction') return undefined
+  const inbound = inboundFor(a.id, orders, v.world.convoys)
+  return factionRemark(a.id, describeFaction(a, inbound), inbound.length > 0)
+}
+
+function ActorCard({ a, v, orders, merchant }: { a: WarActor; v: WarRoomView; orders?: MarketOrder[]; merchant?: MarketMerchant }) {
   const credits = v.history.map((h) => h.holdings[a.id]?.credits).filter((x): x is number => x != null)
   const against = v.world.contracts.filter((c) => c.target === a.id)
   const sponsoring = v.world.contracts.filter((c) => c.sponsor === a.id)
@@ -140,9 +96,12 @@ function ActorCard({ a, v }: { a: WarActor; v: WarRoomView }) {
   return (
     <Panel className="flex flex-col gap-3">
       <div className="flex items-start justify-between gap-2">
-        <div>
+        <div className="flex items-center gap-2.5">
+          <FactionInsignia id={a.id} className="h-9 w-9 shrink-0" title={a.name} />
+          <div>
           <div className="font-display text-lg font-bold uppercase tracking-wider" style={{ color: color(a.id) }}>{a.name}</div>
           <div className="text-xs text-muted">{stance} · {a.kind === 'faction' ? `income ${a.income_per_day} cr/day` : 'runs the Exchange'}</div>
+          </div>
         </div>
         {a.kind === 'faction' && (
           <div className="text-right">
@@ -151,6 +110,12 @@ function ActorCard({ a, v }: { a: WarActor; v: WarRoomView }) {
           </div>
         )}
       </div>
+      <ReadinessSummary a={a} inbound={inboundFor(a.id, orders, v.world.convoys)} />
+      {merchant && <MerchantSummary m={merchant} />}
+      <details className="text-xs">
+        <summary className="cursor-pointer text-steel hover:text-fog">Who they are</summary>
+        <div className="mt-2"><FactionDossier id={a.id} remark={dossierRemark(a, v, orders, merchant)} compact /></div>
+      </details>
       <div className="flex items-end justify-between">
         <Stat label="Treasury" value={`${a.holdings.credits.toLocaleString()} cr`} hint={`reserve ${a.credit_reserve.toLocaleString()}`} />
         <Spark values={credits} stroke={color(a.id)} w={120} />
@@ -283,7 +248,7 @@ function Observer() {
           <select value={days} onChange={(e) => setDays(+e.target.value)} className="border border-line bg-panel px-2 py-1">{[3, 7, 14].map((d) => <option key={d} value={d}>{d}</option>)}</select></label>
         <label className="grid gap-1"><span className="cz-label !text-[10px]">Raid chance / hour</span>
           <select value={raids} onChange={(e) => setRaids(+e.target.value)} className="border border-line bg-panel px-2 py-1">{[0, 4, 8, 20].map((d) => <option key={d} value={d}>{d}%</option>)}</select></label>
-        <label className="flex items-center gap-2"><input type="checkbox" checked={fresh} onChange={(e) => setFresh(e.target.checked)} /> From a fresh world (seed 2026) instead of now</label>
+        <label className="flex items-center gap-2"><input type="checkbox" className="h-6 w-6" checked={fresh} onChange={(e) => setFresh(e.target.checked)} /> From a fresh world (seed 2026) instead of now</label>
         <button className="cz-btn cz-btn-ghost px-4 py-1.5" onClick={() => sim.mutate()} disabled={sim.isPending}>{sim.isPending ? 'Simulating…' : 'Run simulation'}</button>
       </div>
       {sim.isError && <p className="mt-3 text-sm text-hostile">{(sim.error as Error).message}</p>}
@@ -318,6 +283,7 @@ function Observer() {
 // ── page ──
 
 export default function WarRoom() {
+  useMusicState('table')
   const v = useQuery({ queryKey: ['warroom'], queryFn: () => api.warRoom(96), refetchInterval: 5_000 })
   const t = useQuery({ queryKey: ['timeline'], queryFn: () => api.timeline(30), refetchInterval: 5_000 })
   const [filter, setFilter] = useState<'strategic' | 'all' | 'llm' | 'operations'>('strategic')
@@ -330,9 +296,10 @@ export default function WarRoom() {
 
   return (
     <Shell title="War Room" back={{ href: '/', label: 'Hub' }} wide>
+      <RadioFeed />
       {v.isError && <p className="text-hostile">The economy server is not reachable.</p>}
       {d && (
-        <div className="grid gap-4">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted">
             <span className="font-display text-lg font-bold text-fog">{clock(d.world.tick)}</span>
             <span>{d.world.contracts.length} open contract{d.world.contracts.length === 1 ? '' : 's'} · {d.world.contracts_paid} paid out</span>
@@ -341,10 +308,22 @@ export default function WarRoom() {
             {d.world.merchant_insolvent && <span className="text-hostile">Vex is out of credits</span>}
           </div>
 
+          <ScreenTip tip="table" title="Reading the War Table">
+            <p>The map shows real facilities and real movement: a convoy only appears while one is on the road, and a flag only changes when its owner really changes. Select a facility to see its stock, readiness, what has hit it and what its commander last decided.</p>
+            <p>A faction&apos;s voice describes its position; the economy engine makes the decisions, and every one is logged.</p>
+          </ScreenTip>
+          <div className="flex justify-end"><AdvancedSwitch /></div>
+          <Tabs label="War Room sections" tabs={[
+            { id: 'table', label: 'War Table', panel: <>
+          <WarTableSection war={d} market={market.data} />
+
+            </> },
+            { id: 'powers', label: 'Powers', panel: <div className="grid gap-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            {[...d.world.actors].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'faction' ? -1 : 1)).map((a) => <ActorCard key={a.id} a={a} v={d} orders={market.data?.orders} merchant={a.kind === 'merchant' ? market.data?.merchants.find((x) => x.id === a.id) : undefined} />)}
+          </div>
+
           <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
-            <Panel title="Region">
-              <RegionMap v={d} />
-            </Panel>
             <Panel title="Vex Exchange prices">
               <div className="grid gap-3">
                 {d.world.prices.map((p) => (
@@ -362,13 +341,14 @@ export default function WarRoom() {
             </Panel>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
-            {[...d.world.actors].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'faction' ? -1 : 1)).map((a) => <ActorCard key={a.id} a={a} v={d} />)}
-          </div>
-
+            </div> },
+            { id: 'supply', label: 'Operations and supply', panel: <div className="grid gap-4">
+          <Operations />
           <Procurement />
           {market.data && <TradingPartners m={market.data} />}
 
+            </div> },
+            { id: 'decisions', label: 'Why the world changed', panel: <div className="grid gap-4">
           <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
             <section>
               <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -404,6 +384,8 @@ export default function WarRoom() {
           </div>
 
           <Observer />
+            </div> },
+          ]} />
         </div>
       )}
     </Shell>

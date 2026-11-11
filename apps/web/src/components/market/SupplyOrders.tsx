@@ -5,6 +5,13 @@
 // signed in their own wallet (or within a quick-trade budget): place, accept, cancel.
 // The server only applies a step to the game after reading it back from the chain.
 
+import { countOrders, defaultFilter, FILTER_LABEL, filterOrders, type OrderFilter } from '@/lib/market/orders'
+import { MerchantSummary } from '@/components/world/Readiness'
+import { FactionDossier } from '@/components/world/FactionDossier'
+import { OrderChain } from '@/components/market/Procurement'
+import { describeMerchant } from '@/lib/presenter/merchant'
+import { merchantRemark } from '@/lib/presenter/remarks'
+import { FactionInsignia } from '@/components/ui/FactionInsignia'
 import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type MarketMerchant, type MarketOrder, type MarketView, type OrderProposal, type ResourceName } from '@/lib/api'
@@ -33,10 +40,15 @@ function PartnerCard({ x }: { x: MarketMerchant }) {
   return (
     <div className="border border-line bg-ink-2 p-3" data-testid={`partner-${x.id}`}>
       <div className="flex items-baseline justify-between gap-2">
-        <div className="font-display text-lg font-bold uppercase tracking-wider text-fog">{x.name}</div>
+        <div className="flex items-center gap-2 font-display text-lg font-bold uppercase tracking-wider text-fog"><FactionInsignia id={x.id} className="h-7 w-7" title={x.name} />{x.name}</div>
         <div className="font-mono text-xs text-steel">{x.margin_bp / 100}% margin</div>
       </div>
       <div className="mt-0.5 text-xs text-dim">{x.instant_market ? 'Also runs the instant market. ' : ''}Commits up to {x.max_commit_bp / 100}% of a shelf per order · never below {x.min_margin_bp / 100}% over cost</div>
+      <div className="mt-2"><MerchantSummary m={x} /></div>
+      <details className="mt-2 text-xs">
+        <summary className="cursor-pointer text-steel hover:text-fog">Who runs it</summary>
+        <div className="mt-2"><FactionDossier id={x.id} remark={merchantRemark(x.id, describeMerchant(x))} compact /></div>
+      </details>
       <table className="mt-2 w-full text-sm">
         <thead><tr className="text-left text-[11px] uppercase tracking-wider text-dim"><th className="font-normal">Shelf</th><th className="font-normal">Stock</th><th className="font-normal">Sells at</th><th className="font-normal">Buys at</th></tr></thead>
         <tbody>
@@ -130,9 +142,27 @@ export function NewSupplyOrder({ m, session, onDone }: { m: MarketView; session:
 }
 
 /** Orders in the market: yours first, then every faction's. */
+const PAGE = 6
+
+function Filters({ orders, value, onChange }: { orders: MarketOrder[]; value: OrderFilter; onChange: (f: OrderFilter) => void }) {
+  const n = countOrders(orders)
+  return (
+    <div role="group" aria-label="Order status" className="mb-2 flex flex-wrap gap-1" data-testid="order-filters">
+      {(['open', 'filled', 'closed', 'all'] as OrderFilter[]).map((f) => (
+        <button key={f} type="button" aria-pressed={value === f} onClick={() => onChange(f)} data-testid={`order-filter-${f}`} className={`cz-label !text-[11px] border px-3 py-1.5 ${value === f ? 'border-amber bg-amber/15 !text-amber-hi' : 'border-line hover:border-line-strong'}`}>{FILTER_LABEL[f]} ({n[f]})</button>
+      ))}
+    </div>
+  )
+}
+
 export function OrderBoard({ m, session, onDone }: { m: MarketView; session: Session | null; onDone: (msg: string) => void }) {
   const mine = m.orders.filter((o) => session && o.requester === `player:${session.account}`)
-  const others = m.orders.filter((o) => !mine.includes(o)).slice(0, 12)
+  const others = m.orders.filter((o) => !mine.includes(o))
+  const [filter, setFilter] = useState<OrderFilter | null>(null)
+  const [more, setMore] = useState(false)
+  const f = filter ?? defaultFilter(others)
+  const shown = filterOrders(others, f)
+  const list = more ? shown : shown.slice(0, PAGE)
   return (
     <>
       {session && (
@@ -142,7 +172,9 @@ export function OrderBoard({ m, session, onDone }: { m: MarketView; session: Ses
       )}
       <Panel title="MARKET · SUPPLY ORDERS" className="mt-4">
         <p className="mb-2 text-xs text-muted">What the factions are asking for, and who fills it.</p>
-        <div data-testid="market-orders">{others.length ? others.map((o) => <OrderCard key={o.id} o={o} m={m} session={null} onDone={onDone} />) : <p className="text-sm text-muted">No orders yet.</p>}</div>
+        <Filters orders={others} value={f} onChange={(x) => { setFilter(x); setMore(false) }} />
+        <div data-testid="market-orders">{list.length ? list.map((o) => <OrderCard key={o.id} o={o} m={m} session={null} onDone={onDone} />) : <p className="text-sm text-muted">No {FILTER_LABEL[f].toLowerCase()} orders.</p>}</div>
+        {shown.length > PAGE && <button type="button" onClick={() => setMore(!more)} className="mt-2 text-sm text-steel underline hover:text-fog" data-testid="orders-more">{more ? 'Show fewer' : `Show all ${shown.length}`}</button>}
       </Panel>
     </>
   )
@@ -221,6 +253,7 @@ function OrderCard({ o, m, session, onDone }: { o: MarketOrder; m: MarketView; s
       {open && !ranked.length && <div className="mt-1 text-xs text-dim">Waiting for trading partners…</div>}
       {session && open && <button disabled={!!busy} onClick={cancel} className="mt-2 text-xs text-muted underline hover:text-fog" data-testid={`cancel-${o.id}`}>{busy === 'cancel' ? 'Cancelling…' : 'Cancel order'}</button>}
       {err && <p className="mt-1 text-sm text-[#ff8a8d]">{err}</p>}
+      <OrderChain order={o} />
       {o.settlement.length > 0 && (
         <details className="mt-1">
           <summary className="cursor-pointer text-[11px] uppercase tracking-wider text-dim hover:text-fog">Transaction details</summary>

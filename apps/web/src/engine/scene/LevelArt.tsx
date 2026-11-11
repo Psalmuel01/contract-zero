@@ -13,6 +13,7 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { Art, Box, LevelDef } from '../fps/levels';
 import { usePbr } from './usePbr';
+import { idleProps, isDelivering, type WorldCues } from '../fps/lineProps';
 
 const HANGAR = '/textures/hangar';
 
@@ -47,7 +48,7 @@ function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; 
 
 const UNIT = new THREE.BoxGeometry(1, 1, 1);
 /** Small or flat pieces whose shadows nobody reads: skipping them keeps the shadow pass cheap. */
-const NO_SHADOW = ['glass', 'panel', 'lampHead', 'redLed', 'screen', 'road', 'yellow', 'steel', 'frame', 'case', 'stripe', 'skirting', 'wood'];
+const NO_SHADOW = ['glass', 'panel', 'lampHead', 'redLed', 'screen', 'road', 'yellow', 'steel', 'frame', 'case', 'stripe', 'skirting', 'wood', 'signBar'];
 const CYL = new THREE.CylinderGeometry(0.5, 0.5, 1, 20);
 const WHEEL = new THREE.CylinderGeometry(0.5, 0.5, 1, 14).rotateZ(Math.PI / 2);
 
@@ -141,12 +142,13 @@ function Blinker({ x, y, z, color }: { x: number; y: number; z: number; color: s
 }
 
 /** A refinery flare stack: a tall steel stack and a flame that never quite settles. */
-function FlareStack({ x, z, h, calm = false }: { x: number; z: number; h: number; calm?: boolean }) {
+function FlareStack({ x, z, h, calm = false, out = false }: { x: number; z: number; h: number; calm?: boolean; /** The line it burns for is down: no flame, no glow. */ out?: boolean }) {
   const flame = useRef<THREE.Mesh>(null);
   const light = useRef<THREE.PointLight>(null);
   useFrame((st) => {
     const t = st.clock.elapsedTime;
     const k = calm ? 1 : 1 + Math.sin(t * 9) * 0.12 + Math.sin(t * 23) * 0.06;
+    if (out) { if (flame.current) flame.current.visible = false; if (light.current) light.current.intensity = 0; return; }
     if (flame.current) { flame.current.scale.set(k, 1.2 * k + Math.sin(t * 5) * 0.15, k); flame.current.rotation.y = t * 0.8; }
     if (light.current) light.current.intensity = 34 * k;
   });
@@ -191,14 +193,43 @@ function Steam({ x, z, minimal }: { x: number; z: number; minimal: boolean }) {
   );
 }
 
-export function LevelArt({ level, minimal = false, lit = true, night: nightProp, calm = false }: { level: LevelDef; minimal?: boolean; lit?: boolean; night?: boolean; calm?: boolean }) {
+/** Where a production line is down: a hazard board on a post and a slow red lamp, so a ruined line reads as ruined. */
+function OfflineMarker({ x, z }: { x: number; z: number }) {
+  const lamp = useRef<THREE.MeshBasicMaterial>(null);
+  useFrame((st) => { if (lamp.current) lamp.current.opacity = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(st.clock.elapsedTime * 2.2)); });
+  return (
+    <group position={[x, 0, z]} data-offline-marker>
+      <mesh position={[0, 1.2, 0]} castShadow><cylinderGeometry args={[0.06, 0.06, 2.4, 8]} /><meshStandardMaterial color="#3a3d41" metalness={0.6} roughness={0.5} /></mesh>
+      <mesh position={[0, 2.0, 0.06]}><boxGeometry args={[1.5, 0.9, 0.08]} /><meshStandardMaterial color="#d9d4c6" roughness={0.8} /></mesh>
+      {[-0.55, -0.18, 0.18, 0.55].map((px) => <mesh key={px} position={[px, 2.0, 0.11]} rotation={[0, 0, -0.6]}><boxGeometry args={[0.16, 1.0, 0.03]} /><meshStandardMaterial color="#c4361f" /></mesh>)}
+      <mesh position={[0, 2.7, 0]}><sphereGeometry args={[0.16, 10, 8]} /><meshBasicMaterial ref={lamp} color="#ff3b30" transparent opacity={0.9} /></mesh>
+    </group>
+  );
+}
+
+/** A truck that is unloading a delivery that has really arrived: a slow amber beacon on its roof. */
+function DeliveryBeacon({ x, z, y }: { x: number; z: number; y: number }) {
+  const m = useRef<THREE.MeshBasicMaterial>(null);
+  useFrame((st) => { if (m.current) m.current.opacity = 0.25 + 0.75 * Math.max(0, Math.sin(st.clock.elapsedTime * 4.5)); });
+  return (
+    <group position={[x, y, z]} data-delivery-beacon>
+      <mesh><cylinderGeometry args={[0.14, 0.18, 0.18, 10]} /><meshStandardMaterial color="#2b2d30" /></mesh>
+      <mesh position={[0, 0.16, 0]}><sphereGeometry args={[0.16, 10, 8]} /><meshBasicMaterial ref={m} color="#ffb020" transparent opacity={0.9} /></mesh>
+    </group>
+  );
+}
+
+export function LevelArt({ level, minimal = false, colourOnly = false, lit = true, night: nightProp, calm = false, cues }: { level: LevelDef; minimal?: boolean; /** Load colour maps only (touch and minimal tiers). */ colourOnly?: boolean; lit?: boolean; night?: boolean; calm?: boolean; /** What the site's economy is doing (lines down, deliveries). */ cues?: WorldCues | null }) {
+  // What the economy says is down or arriving: shown, never invented.
+  const idle = useMemo(() => idleProps(level, cues), [level, cues]);
+  const delivering = isDelivering(cues);
   // Night look (glowing windows, cool lamps) follows the hour, not the map.
   const night = nightProp ?? level.id === 'blacksite';
-  const corrugated = usePbr('corrugated_iron_02', [1, 1], HANGAR);
-  const plate = usePbr('metal_plate', [1, 1], HANGAR);
-  const concrete = usePbr('concrete_floor_worn_001', [1, 1], HANGAR);
-  const plaster = usePbr('damaged_plaster', [1, 1]);
-  const planks = usePbr('black_painted_planks', [1, 1]);
+  const corrugated = usePbr('corrugated_iron_02', [1, 1], HANGAR, colourOnly);
+  const plate = usePbr('metal_plate', [1, 1], HANGAR, colourOnly);
+  const concrete = usePbr('concrete_floor_worn_001', [1, 1], HANGAR, colourOnly);
+  const plaster = usePbr('damaged_plaster', [1, 1], undefined, colourOnly);
+  const planks = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
 
   const mats = useMemo(() => {
     const tri = (maps: { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture }, o: THREE.MeshStandardMaterialParameters) =>
@@ -238,6 +269,10 @@ export function LevelArt({ level, minimal = false, lit = true, night: nightProp,
       lampHead: new THREE.MeshStandardMaterial({ color: '#000', emissive: night ? '#d8e6ff' : '#ffbe73', emissiveIntensity: 4 }),
       panel: new THREE.MeshStandardMaterial({ color: '#000', emissive: '#e8f0ff', emissiveIntensity: 2.2 }),
       redLed: new THREE.MeshBasicMaterial({ color: '#ff3b30' }),
+      // Painted drums take their colour per instance; sign marks are unlit so they read at night.
+      drum: new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.55, metalness: 0.5 }),
+      signBar: new THREE.MeshBasicMaterial({ color: '#ffffff' }),
+      mattress: new THREE.MeshStandardMaterial({ color: '#cfd6dc', roughness: 0.9 }),
     };
   }, [corrugated, plate, concrete, plaster, planks, night, level.id]);
 
@@ -283,6 +318,12 @@ export function LevelArt({ level, minimal = false, lit = true, night: nightProp,
         case 'tank':
           add('tankCyl', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           add('steel', { x, y: h + 0.05, z, sx: w * 0.7, sy: 0.1, sz: d * 0.7 });
+          // Weld seams, a safety band under the lip, a ladder with its cage, and a roof hatch.
+          for (const f of [0.33, 0.66]) add('pipeCyl', { x, y: h * f, z, sx: w + 0.1, sy: 0.1, sz: d + 0.1 });
+          add('hazardCyl', { x, y: h - 0.35, z, sx: w + 0.06, sy: 0.22, sz: d + 0.06 });
+          add('steel', { x: x + w / 2 + 0.04, y: h / 2, z, sx: 0.06, sy: h, sz: 0.5 });
+          for (let y = 2; y < h; y += 1.5) add('steel', { x: x + w / 2 + 0.2, y, z, sx: 0.04, sy: 0.04, sz: 0.62 });
+          add('hazard', { x, y: h + 0.14, z, sx: 0.9, sy: 0.1, sz: 0.9 });
           break;
         case 'booth':
           add('concrete', { x, y: 0.55, z, sx: w, sy: 1.1, sz: d });
@@ -356,6 +397,32 @@ export function LevelArt({ level, minimal = false, lit = true, night: nightProp,
           add('rust', { x: x - w * 0.2, y: 0.75, z, sx: w * 0.45, sy: 0.9, sz: d * 0.7 });
           add('pipeCyl', { x: x + w * 0.22, y: 0.7, z, sx: d * 0.6, sy: w * 0.4, sz: d * 0.6, rz: Math.PI / 2 });
           break;
+        case 'bed':
+          // A medical cot: frame, mattress and pillow.
+          add('steel', { x, y: 0.28, z, sx: w, sy: 0.1, sz: d });
+          for (const sx of [-1, 1]) for (const sz of [-1, 1]) add('steel', { x: x + (sx * (w - 0.1)) / 2, y: 0.14, z: z + (sz * (d - 0.1)) / 2, sx: 0.06, sy: 0.28, sz: 0.06 });
+          add('mattress', { x, y: 0.5, z, sx: w * 0.94, sy: 0.3, sz: d * 0.94 });
+          { const [px, pz] = fwd(-len / 2 + 0.3); add('mattress', { x: px, y: 0.72, z: pz, sx: alongZ ? wid * 0.7 : 0.4, sy: 0.14, sz: alongZ ? 0.4 : wid * 0.7 }); }
+          break;
+        case 'cabinet':
+          add('desk', { x, y: h / 2, z, sx: w, sy: h, sz: d });
+          add('frame', { x, y: h / 2, z: z + d / 2 + 0.005, sx: 0.03, sy: h * 0.96, sz: 0.01 });
+          add('redLed', { x, y: h * 0.72, z: z + d / 2 + 0.012, sx: 0.28, sy: 0.07, sz: 0.01 });
+          add('redLed', { x, y: h * 0.72, z: z + d / 2 + 0.012, sx: 0.07, sy: 0.28, sz: 0.01 });
+          break;
+        case 'console':
+          add('steel', { x, y: (h - 0.08) / 2, z, sx: w * 0.92, sy: h - 0.08, sz: d * 0.8 });
+          add('desk', { x, y: h - 0.04, z, sx: w, sy: 0.08, sz: d });
+          for (let t = -len / 2 + 0.7; t < len / 2 - 0.3; t += 1.2) { const [px, pz] = fwd(t); add('screen', { x: px, y: h + 0.34, z: pz, sx: alongZ ? 0.04 : 0.55, sy: 0.34, sz: alongZ ? 0.55 : 0.04 }); }
+          break;
+        case 'locker':
+          add('steel', { x, y: h / 2, z, sx: w, sy: h, sz: d });
+          for (let t = -len / 2 + 0.25; t < len / 2; t += 0.5) { const [px, pz] = fwd(t); add('frame', { x: px, y: h / 2, z: pz, sx: alongZ ? w + 0.02 : 0.02, sy: h * 0.94, sz: alongZ ? 0.02 : d + 0.02 }); }
+          break;
+        case 'drum':
+          add('drumCyl', { x, y: h / 2, z, sx: w, sy: h, sz: d, color: (Math.round(x * 7 + z * 3) & 1) ? '#7a2f22' : '#2f4a63' });
+          add('frame', { x, y: h * 0.82, z, sx: w + 0.03, sy: 0.05, sz: d + 0.03 });
+          break;
         default:
           add('concrete', { x, y: h / 2, z, sx: w, sy: h, sz: d });
       }
@@ -383,7 +450,13 @@ export function LevelArt({ level, minimal = false, lit = true, night: nightProp,
         case 'catwalk': {
           const h = a.h ?? 4.5, w = a.w ?? 20, d = a.d ?? 1.2;
           add('steel', { x, y: h, z, sx: w, sy: 0.08, sz: d });
-          add('steel', { x, y: h + 1, z: z + d / 2, sx: w, sy: 0.05, sz: 0.05 });
+          // Rails and toe boards on both edges, so a walkway you can climb reads as one.
+          for (const side of [-1, 1]) {
+            add('steel', { x, y: h + 1, z: z + (side * d) / 2, sx: w, sy: 0.05, sz: 0.05 });
+            add('steel', { x, y: h + 0.5, z: z + (side * d) / 2, sx: w, sy: 0.04, sz: 0.04 });
+            add('hazard', { x, y: h + 0.1, z: z + (side * d) / 2, sx: w, sy: 0.14, sz: 0.04 });
+            for (let t = -w / 2; t <= w / 2 + 0.01; t += 2.75) add('steel', { x: x + t, y: h + 0.5, z: z + (side * d) / 2, sx: 0.05, sy: 1, sz: 0.05 });
+          }
           for (let t = -w / 2; t <= w / 2; t += 3) add('steel', { x: x + t, y: h / 2, z, sx: 0.12, sy: h, sz: 0.12 });
           break;
         }
@@ -396,11 +469,52 @@ export function LevelArt({ level, minimal = false, lit = true, night: nightProp,
           for (let t = -len / 2; t <= len / 2 + 0.01; t += 4) add('steel', { x: along ? x : x + t, y: h / 2, z: along ? z + t : z, sx: 0.12, sy: h, sz: 0.12 });
           break;
         }
+        case 'sign': {
+          // Faces along z unless rotated a quarter turn. No width: a medical cross. A width: a banner.
+          const h = a.h ?? 2.5, side = Math.abs(Math.sin(a.rot ?? 0)) > 0.5;
+          const dim = (along: number, thick: number) => (side ? { sx: thick, sz: along } : { sx: along, sz: thick });
+          if (a.w) {
+            add('frame', { x, y: h, z, sy: 0.7, ...dim(a.w, 0.06) });
+            add('signBar', { x, y: h, z, sy: 0.4, color: a.color, ...dim(a.w * 0.96, 0.08) });
+          } else {
+            add('frame', { x, y: h, z, sy: 0.95, ...dim(0.95, 0.05) });
+            add('signBar', { x, y: h, z, sy: 0.18, color: a.color, ...dim(0.62, 0.07) });
+            add('signBar', { x, y: h, z, sy: 0.62, color: a.color, ...dim(0.18, 0.07) });
+          }
+          break;
+        }
+        case 'valve':
+          // A hand wheel on a stem, on the pipework.
+          add('pipeCyl', { x, y: a.h ?? 3.4, z, sx: 0.55, sy: 0.05, sz: 0.55 });
+          add('steel', { x, y: (a.h ?? 3.4) - 0.2, z, sx: 0.06, sy: 0.4, sz: 0.06 });
+          break;
         case 'camera':
           add('frame', { x, y: a.h ?? 3, z, sx: 0.18, sy: 0.18, sz: 0.4 });
           add('redLed', { x, y: (a.h ?? 3) + 0.05, z: z + 0.21, sx: 0.04, sy: 0.04, sz: 0.02 });
           break;
         default:
+      }
+    }
+    // Stairs: a stringer slab, a tread every 0.45 m, and a rail up each side.
+    for (const st of level.stairs ?? []) {
+      const alongX = st.rise.endsWith('x'), len = alongX ? st.w : st.d, wid = alongX ? st.d : st.w;
+      const dir = st.rise.startsWith('+') ? 1 : -1;
+      const ang = Math.atan2(st.h, len), slope = Math.hypot(len, st.h);
+      // The point a distance t from the foot, along the climb, at the stair's surface.
+      const foot = alongX ? st.x - dir * len / 2 : st.z - dir * len / 2;
+      const at = (t: number, lat = 0): [number, number, number] => alongX ? [foot + dir * t, (t / len) * st.h, st.z + lat] : [st.x + lat, (t / len) * st.h, foot + dir * t];
+      const [mx, my, mz] = at(len / 2);
+      // Euler signs: about Z a positive angle raises +x; about X it raises -z. So +x and -z take +angle, -x and +z take -angle.
+      const tilt = (alongX ? dir : -dir) * ang;
+      add('steel', alongX ? { x: mx, y: my - 0.06, z: mz, sx: slope, sy: 0.12, sz: wid, rz: tilt } : { x: mx, y: my - 0.06, z: mz, sx: wid, sy: 0.12, sz: slope, rx: tilt });
+      for (let t = 0.3; t < len; t += 0.45) {
+        const [tx, ty, tz] = at(t);
+        add('hazard', alongX ? { x: tx, y: ty + 0.02, z: tz, sx: 0.28, sy: 0.04, sz: wid * 0.94 } : { x: tx, y: ty + 0.02, z: tz, sx: wid * 0.94, sy: 0.04, sz: 0.28 });
+      }
+      for (const side of [-1, 1]) {
+        const [rx, ry, rz] = at(len / 2, (side * wid) / 2);
+        add('steel', alongX ? { x: rx, y: ry + 1, z: rz, sx: slope, sy: 0.05, sz: 0.05, rz: tilt } : { x: rx, y: ry + 1, z: rz, sx: 0.05, sy: 0.05, sz: slope, rx: tilt });
+        for (let t = 0; t <= len + 0.01; t += 2) { const [px, py, pz] = at(Math.min(t, len), (side * wid) / 2); add('steel', { x: px, y: py + 0.5, z: pz, sx: 0.05, sy: 1, sz: 0.05 }); }
       }
     }
     return out;
@@ -417,13 +531,17 @@ export function LevelArt({ level, minimal = false, lit = true, night: nightProp,
       {Object.entries(parts).map(([k, items]) =>
         k === 'tankCyl' ? <Instanced key={k} items={items} material={mats.tank} geometry={CYL} cast={cast} />
         : k === 'pipeCyl' ? <Instanced key={k} items={items} material={mats.pipe} geometry={CYL} cast={cast} />
+        : k === 'drumCyl' ? <Instanced key={k} items={items} material={mats.drum} geometry={CYL} cast={cast} />
+        : k === 'hazardCyl' ? <Instanced key={k} items={items} material={mats.hazard} geometry={CYL} cast={false} />
         : k === 'tire' ? <Instanced key={k} items={items} material={mats.tire} geometry={WHEEL} cast={false} />
         : k === 'fenceMesh' ? <Instanced key={k} items={items} material={mats.fence} cast={false} />
         : <Instanced key={k} items={items} material={(mats as Record<string, THREE.Material>)[k] ?? mats.concrete} cast={cast && !NO_SHADOW.includes(k)} />,
       )}
       {beacons.map((b, i) => <Blinker key={i} x={b.x} y={b.h ?? 5} z={b.z} color={b.color ?? '#ff3b30'} />)}
-      {level.art.filter((a) => a.kind === 'stack').map((a, i) => <FlareStack key={`stack${i}`} x={a.x} z={a.z} h={a.h ?? 20} calm={calm} />)}
-      {level.art.filter((a) => a.kind === 'steam').map((a, i) => <Steam key={`steam${i}`} x={a.x} z={a.z} minimal={minimal} />)}
+      {level.art.filter((a) => a.kind === 'stack').map((a, i) => <FlareStack key={`stack${i}`} x={a.x} z={a.z} h={a.h ?? 20} calm={calm} out={idle.art.has(a)} />)}
+      {level.art.filter((a) => a.kind === 'steam' && !idle.art.has(a)).map((a, i) => <Steam key={`steam${i}`} x={a.x} z={a.z} minimal={minimal} />)}
+      {idle.lines.map((l) => <OfflineMarker key={`${l.resource}-${l.line}`} x={l.anchor[0]} z={l.anchor[1]} />)}
+      {delivering && [...level.walls, ...level.cover].filter((b) => b.kind === 'truck' && !idle.boxes.has(b)).map((b, i) => <DeliveryBeacon key={`dlv${i}`} x={b.x} z={b.z} y={(b.h ?? 2.6) + 0.1} />)}
       {floods.map((f, i) => (
         <group key={i}>
           <mesh position={[f.x, f.h ?? 7.4, f.z]}><boxGeometry args={[0.7, 0.5, 0.5]} /><primitive object={mats.lampHead} attach="material" /></mesh>

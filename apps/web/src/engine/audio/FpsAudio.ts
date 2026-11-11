@@ -2,14 +2,23 @@ import type { Speaker } from '../story/presence';
 import { spatialize } from './spatial';
 import type { GunShotAudio } from '../combat/GunFeel';
 import { MusicLayers } from './MusicLayers';
+import { VoiceBudget, type Channel } from './voices';
+import { effectiveState, stateForIntensity, type MusicState } from './musicState';
+import { alarmPattern, closestApproach, distanceClass, nearMissStrength, propagationDelay, type AlarmLevel, type Vec3 } from './combat';
+import { impulseResponse, INDOOR_IR, isIndoors, OUTDOOR_IR, spaceMix } from './acoustics';
+import type { LevelDef } from '../fps/levels';
+import { SoundscapeRunner } from './soundscapeRunner';
+import { idleProps, isDelivering, type WorldCues } from '../fps/lineProps';
+import type { LevelId } from '../fps/levels';
 
 /**
  * @module audio/FpsAudio
  * @description The tactical audio director for CONTRACT ZERO.
  *
  * Ready-or-Not sells itself through sound, so this is the first full-quality
- * system. Self-contained WebAudio synthesis — no samples to download, which
- * keeps it instant on mobile — routed through a small bus + limiter graph so
+ * system. Self-contained WebAudio synthesis — the only downloads are four tiny
+ * generated mp3s (three rifle shots, one wall impact), so it stays instant on
+ * mobile — routed through a small bus + limiter graph so
  * the mix has a ducking hierarchy instead of everything hitting the speakers
  * flat:
  *
@@ -27,9 +36,10 @@ import { MusicLayers } from './MusicLayers';
 
 type Ctx = AudioContext;
 
-// Real recorded gunshots (Pixabay, royalty-free) — the synth read like a punch,
-// so the gun is real audio now. Trimmed dry + loudness-matched; one is picked at
-// random per shot with a little pitch wobble so rapid fire isn't a copy-paste.
+// Gunshot and wall-impact samples: original, synthesised offline by
+// scripts/generate-sfx.mjs (see CREDITS.md), not recordings. The runtime synth read
+// like a punch, so the gun plays these buffers. One is picked at random per shot
+// with a little pitch wobble so rapid fire isn't a copy-paste.
 const SAMPLE_BASE = '/sounds/fps/';
 const RIFLE_FILES = ['rifle_1.mp3', 'rifle_2.mp3', 'rifle_3.mp3'];
 const WALL_FILE = 'impact_wall.mp3';
@@ -54,12 +64,27 @@ export function zoneAmbience(zone: string): { lp: number; vol: number; drone?: n
   return ZONE_AMB[zone] ?? ZONE_AMB.DUSTLINE;
 }
 
+/**
+ * Which ambience bed a mission plays. A contract is bound to a site, so the site's
+ * level decides it; `zone` on a contract is only a time-of-day theme (day, dusk and
+ * night map to DUSTLINE, REDYARD and BLACKSITE) and must not pick the room tone.
+ * Authored missions (campaign, survival) carry no level and keep their own zone.
+ */
+export function ambienceKey(zone: string, level?: LevelId): string {
+  if (level === 'blacksite') return 'BLACKSITE';
+  if (level === 'cinder_yard') return 'CINDER_YARD';
+  if (level === 'dustline_depot') return 'DUSTLINE';
+  return zone;
+}
+
 // Per-zone ambience bed: how dark the room tone is (lowpass), how loud, and an
 // optional low drone — the Rift gets an ominous sub hum, Survival a tense one.
 const ZONE_AMB: Record<string, { lp: number; vol: number; drone?: number }> = {
+  NONE: { lp: 300, vol: 0 },                        // not on a site (the Hub, the tables): no room tone
   DUSTLINE: { lp: 520, vol: 0.05 },
   'REDYARD': { lp: 360, vol: 0.045 },        // colder, quieter, institutional
   'BLACKSITE': { lp: 240, vol: 0.06, drone: 44 },     // the dark place hums under you
+  CINDER_YARD: { lp: 300, vol: 0.055, drone: 55 },   // a refinery's low rumble; the machinery bed sits on top
   SURVIVAL: { lp: 620, vol: 0.055, drone: 70 },      // a taut arena bed
 };
 
@@ -73,8 +98,10 @@ export interface FpsAudioStats {
   zone: string;    // the ambience bed currently loaded
 }
 
-/** The player's volume mix, 0…1 per channel. */
-export interface Mix { master: number; music: number; effects: number; voice: number; ambience: number; ui: number }
+/** The player's volume mix, 0…1 per channel. `effects` is the Combat channel (its saved key predates
+ *  the split); `ambience` is Environment; `voice` is Radio and dialogue; `interactions` covers reloads,
+ *  pickups and footsteps. */
+export interface Mix { master: number; music: number; effects: number; voice: number; ambience: number; ui: number; interactions: number }
 
 export class FpsAudio {
   private ctx: Ctx | null = null;
@@ -83,14 +110,43 @@ export class FpsAudio {
   private gunBus!: GainNode;
   private impactBus!: GainNode;
   private uiBus!: GainNode;
+  /** Reloads, pickups, footsteps. */
+  private interactBus!: GainNode;
+  /** Ducking stages: a bus's level is its mix gain; a duck is a temporary dip on top, so the two never fight. */
+  private combatDuck!: GainNode;
+  private ambDuck!: GainNode;
+  private musicDuck!: GainNode;
+  private interactDuck!: GainNode;
+  /** The level's roofs, for telling indoors from outdoors; and two reverbs (a dense room, open ground). */
+  private roofs: LevelDef['art'] | null = null;
+  private level: LevelDef | null = null;
+  private cues: WorldCues | null = null;
+  /** Positional sounds of the site (soundscape.ts): engines, hums, steam, a PA. */
+  soundscape: SoundscapeRunner | null = null;
+  private indoors = false;
+  private reverbIn!: GainNode;
+  private roomWet!: GainNode;
+  private openWet!: GainNode;
+  private extractHum: { oscs: OscillatorNode[]; gain: GainNode } | null = null;
+  /** How many sounds may play at once, and which give way first (voices.ts). */
+  private budget = new VoiceBudget({
+    max: 28,
+    perChannel: { interactions: 6, ui: 6 },
+    cooldownMs: { impact: 28, 'enemy-shot': 45, footstep: 140, explosion: 250, hitmarker: 40, clack: 35, heartbeat: 400, whiz: 120, ricochet: 150, 'enemy-step': 90, extract: 300 },
+  });
   private ambBus!: GainNode;
-  private ambBaseVol = 0.05;
+  /** The Environment channel's own gain, for the positional sounds of the site. `ambBus` is the room-tone level (a
+   *  few hundredths), which would swallow them. */
+  private envBus!: GainNode;
+  private ambBaseVol = 0; // no site until a mission sets a zone: the Hub has no room tone
   /** The player's mix (Settings → Audio) and whether the tab is in the background. */
-  private mix: Mix = { master: 0.9, music: 0.5, effects: 1, voice: 1, ambience: 0.8, ui: 0.8 };
+  private mix: Mix = { master: 0.9, music: 0.5, effects: 1, voice: 1, ambience: 0.8, ui: 0.8, interactions: 1 };
   /** The adaptive score (MusicLayers) on its own bus, under the music slider. */
   private musicBus!: GainNode;
   private music: MusicLayers | null = null;
-  private musicLevel: 0 | 1 | 2 | 3 = 0;
+  /** What the score plays: the base state (the screen, or the fight's intensity) unless an override (the extraction) is set. */
+  private musicBase: MusicState = 'silent';
+  private musicOverride: MusicState | null = null;
   private backgroundMuted = false;
   private voiceBus!: GainNode;
   /** The ambience level after the player's ambience slider. */
@@ -100,14 +156,14 @@ export class FpsAudio {
   /** A refinery's machinery: a pump hum and steam vents letting go now and then. */
   private machineryOn = false;
   private machinery: { oscs: OscillatorNode[]; gain: GainNode; hiss: number } | null = null;
-  private zone = 'DUSTLINE';
+  private zone = 'NONE';
 
   // Listener pose (camera), updated each frame.
   private lx = 0;
   private lz = 0;
   private lyaw = 0;
 
-  private stats_: FpsAudioStats = { shots: 0, impacts: 0, reloads: 0, footsteps: 0, unlocked: false, samples: 0, zone: 'DUSTLINE' };
+  private stats_: FpsAudioStats = { shots: 0, impacts: 0, reloads: 0, footsteps: 0, unlocked: false, samples: 0, zone: 'NONE' };
 
   // Real gunshot samples, decoded into this context's graph.
   private rifle: AudioBuffer[] = [];
@@ -157,7 +213,43 @@ export class FpsAudio {
       this.voiceBus = ctx.createGain();
       this.musicBus = ctx.createGain();
       this.musicBus.gain.value = 0;
-      for (const b of [this.gunBus, this.impactBus, this.uiBus, this.ambBus, this.voiceBus, this.musicBus]) b.connect(this.master);
+      this.interactBus = ctx.createGain();
+      this.combatDuck = ctx.createGain();
+      this.ambDuck = ctx.createGain();
+      this.musicDuck = ctx.createGain();
+      this.interactDuck = ctx.createGain();
+      // bus -> (duck stage) -> master. UI and radio are never ducked.
+      this.gunBus.connect(this.combatDuck);
+      this.impactBus.connect(this.combatDuck);
+      this.combatDuck.connect(this.master);
+      this.envBus = ctx.createGain();
+      this.envBus.gain.value = this.mix.ambience;
+      this.ambBus.connect(this.ambDuck); this.envBus.connect(this.ambDuck); this.ambDuck.connect(this.master);
+      this.musicBus.connect(this.musicDuck); this.musicDuck.connect(this.master);
+      this.interactBus.connect(this.interactDuck); this.interactDuck.connect(this.master);
+      this.uiBus.connect(this.master);
+      this.voiceBus.connect(this.master);
+      // Reverb: combat sound (after ducking) is sent to a dense room and to open ground; which one is
+      // heard depends on whether the listener is under a roof (setListener -> applySpace).
+      this.reverbIn = ctx.createGain();
+      this.roomWet = ctx.createGain();
+      this.openWet = ctx.createGain();
+      this.roomWet.gain.value = 0;
+      this.openWet.gain.value = 0;
+      this.combatDuck.connect(this.reverbIn);
+      for (const [spec, wet] of [[INDOOR_IR, this.roomWet], [OUTDOOR_IR, this.openWet]] as const) {
+        const conv = ctx.createConvolver();
+        const ir = ctx.createBuffer(2, Math.floor(ctx.sampleRate * spec.seconds), ctx.sampleRate);
+        for (let c = 0; c < 2; c++) ir.getChannelData(c).set(impulseResponse(ctx.sampleRate, spec, c));
+        conv.buffer = ir;
+        this.reverbIn.connect(conv);
+        conv.connect(wet);
+        wet.connect(this.master);
+      }
+      this.applySpace();
+      // the sounds of the site, on the Environment channel
+      this.soundscape = new SoundscapeRunner(ctx, this.envBus, (s) => this.noise(s), (key, pri, ms) => this.allow(key, 'environment', pri, ms));
+      this.soundscape.setLevel(this.level, this.scapeState());
       this.applyMix();
       // The score only runs while it can be heard: a muted music slider costs nothing.
       this.syncMusic();
@@ -166,7 +258,7 @@ export class FpsAudio {
       void this.loadSamples();
       this.stats_.unlocked = true;
     }
-    this.ctx?.resume?.().catch(() => {});
+    if (!this.isHeld()) this.ctx?.resume?.().catch(() => {});
   }
 
   private async loadSamples(): Promise<void> {
@@ -185,6 +277,11 @@ export class FpsAudio {
   }
 
   /** True once a user gesture has built the graph (autoplay is allowed). */
+  /** Ask the voice budget before building a sound. False means skip it. */
+  private allow(key: string, channel: Channel, priority: number, durationMs: number): boolean {
+    return this.budget.request({ key, channel, priority, durationMs }, typeof performance !== 'undefined' ? performance.now() : Date.now()).ok;
+  }
+
   isUnlocked(): boolean {
     return this.stats_.unlocked;
   }
@@ -193,19 +290,75 @@ export class FpsAudio {
     this.lx = x;
     this.lz = z;
     this.lyaw = yaw;
+    // under a roof or not; a small margin so the doorway is already the room
+    const inside = isIndoors(this.roofs, x, z, 0.8);
+    if (inside !== this.indoors) {
+      this.indoors = inside;
+      this.applySpace();
+    }
+    this.soundscape?.update(x, z, yaw, typeof performance !== 'undefined' ? performance.now() : Date.now());
   }
 
-  stats(): FpsAudioStats & { mix: Mix; backgroundMuted: boolean; masterGain: number | null; music: { playing: boolean; level: number; gain: number | null } } {
+  /** The level being played: indoor and outdoor acoustics, and the sounds of the site. Null (training, endless) is all outdoors and silent of emitters. */
+  /** What the economy says is running at the site: idle lines are silent, a landing delivery runs the engines louder. */
+  private scapeState() {
+    return this.level ? { idle: idleProps(this.level, this.cues), delivering: isDelivering(this.cues) } : {};
+  }
+
+  setLevel(level: LevelDef | null, cues: WorldCues | null = null): void {
+    this.level = level;
+    this.cues = cues;
+    this.roofs = level ? level.art : null;
+    const inside = isIndoors(this.roofs, this.lx, this.lz, 0.8);
+    if (inside !== this.indoors) this.indoors = inside;
+    this.applySpace();
+    this.soundscape?.setLevel(level, this.scapeState());
+  }
+
+  /** Fade the reverb to the space the listener is in. */
+  private applySpace(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.roomWet) return;
+    const m = spaceMix(this.indoors);
+    this.roomWet.gain.setTargetAtTime(m.indoorWet, ctx.currentTime, 0.12);
+    this.openWet.gain.setTargetAtTime(m.outdoorWet, ctx.currentTime, 0.12);
+  }
+
+  /** The level being played (probes). */
+  get currentLevel(): LevelDef | null { return this.level; }
+
+  /** Whether the listener is under a roof (probes). */
+  isIndoors(): boolean {
+    return this.indoors;
+  }
+
+  stats(): FpsAudioStats & { mix: Mix; backgroundMuted: boolean; masterGain: number | null; music: { playing: boolean; state: MusicState; gain: number | null }; voices: { granted: number; refused: Record<string, number> } } {
     return {
+      voices: { granted: this.budget.granted, refused: { ...this.budget.refused } },
       ...this.stats_, mix: { ...this.mix }, backgroundMuted: this.backgroundMuted, masterGain: this.master ? this.master.gain.value : null,
-      music: { playing: !!this.music, level: this.musicLevel, gain: this.musicBus ? this.musicBus.gain.value : null },
+      music: { playing: !!this.music, state: effectiveState(this.musicBase, this.musicOverride), gain: this.musicBus ? this.musicBus.gain.value : null },
     };
   }
 
-  /** Combat intensity for the score: 0 calm, 1 alert, 2 engaged, 3 boss. */
+  /** Combat intensity for the score: 0 calm, 1 alert, 2 engaged, 3 boss. The fight's own call, every frame. */
   setMusicIntensity(level: 0 | 1 | 2 | 3): void {
-    this.musicLevel = level;
-    this.music?.setIntensity(level);
+    this.setMusicState(stateForIntensity(level));
+  }
+
+  /** What the score does on this screen: hub, prep, table, results... Layered and crossfaded, never restarted. */
+  setMusicState(state: MusicState): void {
+    this.musicBase = state;
+    this.applyMusicState();
+  }
+
+  /** A state that wins over the base (the extraction countdown); null returns to the base. */
+  setMusicOverride(state: MusicState | null): void {
+    this.musicOverride = state;
+    this.applyMusicState();
+  }
+
+  private applyMusicState(): void {
+    this.music?.setState(effectiveState(this.musicBase, this.musicOverride));
   }
 
   /** A beat of silence in the score, for a kill or a catch to land in. */
@@ -219,7 +372,7 @@ export class FpsAudio {
     if (this.mix.music > 0 && !this.music) {
       this.music = new MusicLayers(ctx, this.musicBus);
       this.music.start();
-      this.music.setIntensity(this.musicLevel);
+      this.applyMusicState();
     } else if (this.mix.music <= 0 && this.music) {
       this.music.dispose();
       this.music = null;
@@ -227,6 +380,9 @@ export class FpsAudio {
   }
 
   dispose(): void {
+    this.setExtraction(false);
+    this.soundscape?.dispose();
+    this.soundscape = null;
     this.music?.dispose();
     this.music = null;
     try { this.ctx?.close(); } catch { /* already closed */ }
@@ -238,6 +394,7 @@ export class FpsAudio {
   // profile, so a pistol snaps, an SMG spits fast and thin, the marksman BOOMS,
   // and the legendary punches — all distinct, no extra downloads.
   shot(profile: GunShotAudio): void {
+    if (!this.allow('shot', 'combat', 100, 300)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     if (this.rifle.length === 0) { this.synthShot(profile); return; } // ~1 frame until decoded
@@ -301,6 +458,7 @@ export class FpsAudio {
 
   // ── A round landing: spatialised at its world point (flesh vs wall) ──
   impact(kind: 'flesh' | 'wall', at: [number, number, number]): void {
+    if (!this.allow('impact', 'combat', 40, 400)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     const sp = spatialize(this.lx, this.lz, this.lyaw, at[0], at[2]);
@@ -343,6 +501,7 @@ export class FpsAudio {
       src.playbackRate.value = 0.95 + Math.random() * 0.12;
       src.connect(g);
       src.start(now);
+      if (Math.random() < 0.28 && this.allow('ricochet', 'combat', 35, 350)) this.ricochet(g, now);
     } else {
       // synth fallback until the impact sample decodes
       const tick = ctx.createBufferSource();
@@ -361,8 +520,26 @@ export class FpsAudio {
     this.stats_.impacts++;
   }
 
+  /** A round glancing off hard cover: a thin whine that falls away, through the impact's own spatial chain. */
+  private ricochet(dest: AudioNode, now: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const o = ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(2600 + Math.random() * 600, now + 0.01);
+    o.frequency.exponentialRampToValueAtTime(900, now + 0.3);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.07, now + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    o.connect(g).connect(dest);
+    o.start(now);
+    o.stop(now + 0.32);
+  }
+
   /** Crisp, centred confirmation your shot connected (audio-first kill-confirm). */
   hitmarker(killed: boolean): void {
+    if (!this.allow('hitmarker', 'ui', 70, 120)) return;
     this.tick(killed ? 3400 : 2400, 0.12, 0);
     if (killed) this.tick(1600, 0.14, 0.05);
   }
@@ -370,7 +547,7 @@ export class FpsAudio {
   /** A meaty mechanical knock (mag/bolt) — noise through a low bandpass with body. */
   private clack(freq: number, vol: number, delay: number, dur = 0.08): void {
     const ctx = this.ctx;
-    if (!ctx) return;
+    if (!ctx || !this.allow('clack', 'interactions', 30, 200)) return;
     const now = ctx.currentTime + delay;
     const src = ctx.createBufferSource();
     src.buffer = this.noise(dur + 0.02);
@@ -381,14 +558,14 @@ export class FpsAudio {
     const g = ctx.createGain();
     g.gain.setValueAtTime(vol, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + dur);
-    src.connect(bp).connect(g).connect(this.uiBus);
+    src.connect(bp).connect(g).connect(this.interactBus);
     src.start(now);
     src.stop(now + dur + 0.02);
   }
 
   /** Reload BEGIN: mag-release click, then the magazine sliding/dropping out. */
   reloadStart(): void {
-    this.tick(2200, 0.10, 0);          // release button
+    this.tick(2200, 0.10, 0, this.interactBus);         // release button
     this.clack(430, 0.15, 0.07, 0.10); // mag unseats
     this.clack(300, 0.11, 0.17, 0.13); // mag drops clear
     this.stats_.reloads++;
@@ -402,7 +579,7 @@ export class FpsAudio {
   }
 
   reloadEnd(): void {
-    this.tick(1200, 0.15, 0);
+    this.tick(1200, 0.15, 0, this.interactBus);
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime + 0.03;
@@ -412,7 +589,7 @@ export class FpsAudio {
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.12, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
-    osc.connect(g).connect(this.uiBus);
+    osc.connect(g).connect(this.interactBus);
     osc.start(now);
     osc.stop(now + 0.1);
   }
@@ -425,6 +602,7 @@ export class FpsAudio {
 
   /** Extraction countdown pip; `hi` on the last seconds. */
   beep(hi = false): void {
+    if (!this.allow('beep', 'ui', 50, 120)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -441,6 +619,7 @@ export class FpsAudio {
 
   /** A demolition charge: a low boom with a long noisy tail, spatialised. */
   explosion(at: [number, number, number]): void {
+    if (!this.allow('explosion', 'combat', 80, 2500)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     const sp = spatialize(this.lx, this.lz, this.lyaw, at[0], at[2]);
@@ -475,34 +654,142 @@ export class FpsAudio {
     this.duck(0.8, 0.6);
   }
 
-  /** A site alarm: a rising two-tone wail for a few seconds. */
-  alarm(secs = 4): void {
+  /** A site alarm. Level 1 is alerted, 2 is the fuse lit, 3 the final seconds: each faster, higher and
+   *  fuller than the last (combat/alarmPattern). */
+  alarm(secs = 4, level: AlarmLevel = 1): void {
     const ctx = this.ctx;
     if (!ctx) return;
+    if (!this.allow('alarm', 'combat', 70, 1000)) return;
+    const pat = alarmPattern(level);
     const now = ctx.currentTime;
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, now);
-    g.gain.linearRampToValueAtTime(0.035, now + 0.3);
-    g.gain.setValueAtTime(0.035, now + secs - 0.4);
+    g.gain.linearRampToValueAtTime(pat.gain, now + 0.3);
+    g.gain.setValueAtTime(pat.gain, now + secs - 0.4);
     g.gain.linearRampToValueAtTime(0.0001, now + secs);
-    for (let t = 0; t < secs; t += 1) {
-      osc.frequency.setValueAtTime(520, now + t);
-      osc.frequency.linearRampToValueAtTime(780, now + t + 0.5);
-      osc.frequency.linearRampToValueAtTime(520, now + t + 1);
-    }
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = 1800;
-    osc.connect(lp).connect(g).connect(this.uiBus);
-    osc.start(now);
-    osc.stop(now + secs);
+    lp.frequency.value = 1800 + level * 400;
+    lp.connect(g).connect(this.gunBus);
+    const voice = (type: OscillatorType, ratio: number, level_: number) => {
+      const osc = ctx.createOscillator();
+      osc.type = type;
+      for (let t = 0; t < secs; t += pat.periodS) {
+        osc.frequency.setValueAtTime(pat.loHz * ratio, now + t);
+        osc.frequency.linearRampToValueAtTime(pat.hiHz * ratio, now + t + pat.periodS / 2);
+        osc.frequency.linearRampToValueAtTime(pat.loHz * ratio, now + t + pat.periodS);
+      }
+      const og = ctx.createGain();
+      og.gain.value = level_;
+      osc.connect(og).connect(lp);
+      osc.start(now);
+      osc.stop(now + secs);
+    };
+    voice('sawtooth', 1, 1);
+    if (pat.second) voice('square', 1.5, 0.35); // the last seconds are doubled a fifth up
+  }
+
+  // ── Extraction ──
+
+  /** The extraction is called: a radio click and three rising notes. */
+  extractCall(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.allow('extract', 'ui', 75, 600)) return;
+    this.noiseBand(1500, 0.08, 0.12);
+    const now = ctx.currentTime;
+    [660, 880, 1100].forEach((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now + i * 0.11);
+      g.gain.exponentialRampToValueAtTime(0.08, now + i * 0.11 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.11 + 0.14);
+      o.connect(g).connect(this.uiBus);
+      o.start(now + i * 0.11);
+      o.stop(now + i * 0.11 + 0.16);
+    });
+  }
+
+  /** You left the zone: two falling notes, a warning and not a punishment. */
+  extractLeft(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.allow('extract', 'ui', 75, 600)) return;
+    const now = ctx.currentTime;
+    [700, 520].forEach((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'square';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now + i * 0.16);
+      g.gain.exponentialRampToValueAtTime(0.06, now + i * 0.16 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, now + i * 0.16 + 0.2);
+      o.connect(g).connect(this.uiBus);
+      o.start(now + i * 0.16);
+      o.stop(now + i * 0.16 + 0.22);
+    });
+  }
+
+  /** Out: a resolved open fifth over a long low floor, the full stop after the countdown. */
+  extractSuccess(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.allow('extract', 'ui', 80, 1800)) return;
+    const now = ctx.currentTime;
+    for (const [f, vol] of [[220, 0.16], [330, 0.14], [440, 0.1]] as const) {
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(vol, now + 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 1.7);
+      o.connect(g).connect(this.uiBus);
+      o.start(now);
+      o.stop(now + 1.75);
+    }
+    this.musicGap(400);
+  }
+
+  /** The ride in: a low engine swelling while the countdown runs, fading when it ends or breaks. */
+  setExtraction(on: boolean): void {
+    this.setMusicOverride(on ? 'extraction' : null);   // the score climbs with the countdown (even before audio is unlocked)
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (!on) {
+      const h = this.extractHum;
+      if (h) {
+        h.gain.gain.setTargetAtTime(0, ctx.currentTime, 0.4);
+        setTimeout(() => h.oscs.forEach((o) => { try { o.stop(); } catch { /* stopped */ } }), 1800);
+        this.extractHum = null;
+      }
+      return;
+    }
+    if (this.extractHum) return;
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 170;
+    gain.connect(lp).connect(this.ambBus);
+    const oscs = [52, 79, 104].map((f, i) => {
+      const o = ctx.createOscillator();
+      o.type = i === 2 ? 'sine' : 'sawtooth';
+      // revving up as it approaches: where machinery masks the level (Cinder Yard), the rising pitch still reads
+      o.frequency.setValueAtTime(f * 0.7, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(f, ctx.currentTime + 5);
+      const g = ctx.createGain();
+      g.gain.value = i === 2 ? 0.14 : 0.24;
+      o.connect(g).connect(gain);
+      o.start();
+      return o;
+    });
+    gain.gain.setTargetAtTime(1, ctx.currentTime, 2.2); // it arrives slowly, like something approaching
+    this.extractHum = { oscs, gain };
   }
 
   /** Dry hammer click on an empty magazine. */
   empty(): void {
-    this.tick(1500, 0.09, 0);
+    this.tick(1500, 0.09, 0, this.interactBus);
   }
 
   /**
@@ -516,7 +803,7 @@ export class FpsAudio {
     // never let a missing context swallow a line.
     if (this.ctx) {
       this.radioSignature(speaker);
-      this.duck(0.8, 1.8);
+      this.radioDuck(1.8);
     }
     // A contract's own lines are written per mission and never have a recording.
     if (id.startsWith('dyn-')) return;
@@ -556,6 +843,9 @@ export class FpsAudio {
       this.noiseBand(1400, 0.07, 0.09);
     } else if (speaker === 'vanguard') { // low — the channel drops to make room for command
       this.noiseBand(520, 0.16, 0.16);
+    } else if (speaker === 'halcyon') {  // clean and narrow: a procurement desk's headset
+      this.noiseBand(2800, 0.06, 0.1);
+      this.noiseBand(2100, 0.05, 0.07);
     } else if (speaker === 'ashen') {   // harsh, overdriven: a refinery set
       this.noiseBand(760, 0.13, 0.15);
       this.noiseBand(2600, 0.09, 0.08);
@@ -575,7 +865,9 @@ export class FpsAudio {
     bp.frequency.value = freq;
     bp.Q.value = 2.2;
     const g = ctx.createGain();
-    g.gain.setValueAtTime(vol, now);
+    // A narrow band of noise carries little energy (it measured about -50 dBFS at the authored levels,
+    // under the music), so the radio click is scaled up to sit where the cue can be heard.
+    g.gain.setValueAtTime(vol * 8, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + dur);
     src.connect(bp).connect(g).connect(this.voiceBus ?? this.uiBus);
     src.start(now);
@@ -604,6 +896,7 @@ export class FpsAudio {
 
   /** Own footstep — quiet, centred, low. Scene calls this on a cadence when moving. */
   footstep(vol = 0.09): void {
+    if (!this.allow('footstep', 'interactions', 20, 120)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -615,38 +908,103 @@ export class FpsAudio {
     const g = ctx.createGain();
     g.gain.setValueAtTime(vol, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
-    src.connect(lp).connect(g).connect(this.impactBus);
+    src.connect(lp).connect(g).connect(this.interactBus);
     src.start(now);
     src.stop(now + 0.08);
     this.stats_.footsteps++;
   }
 
-  /** An ENEMY's shot — the same real rifle crack, but spatialised from their
-   *  position so you can hear where the fire is coming from (slice 3). */
-  enemyShot(at: [number, number, number]): void {
+  /** An ENEMY's shot: the same crack as yours, spatialised from the shooter so you hear where the
+   *  fire is coming from. A shot beyond about 30 m arrives late (sound is slow), duller and with an
+   *  echo off the ground. If `info` says the round missed, and its path really passed near your
+   *  head, you hear it go by, before the crack, whether or not the shot itself is audible. */
+  enemyShot(at: [number, number, number], info?: { impact: Vec3; hit: boolean }): void {
     const ctx = this.ctx;
-    if (!ctx || this.rifle.length === 0) return;
+    if (!ctx) return;
+    if (info && !info.hit) {
+      const c = closestApproach(at, info.impact, [this.lx, 1.6, this.lz]);
+      const strength = nearMissStrength(c.dist);
+      if (strength > 0) this.whiz(c.point, strength);
+    }
+    if (this.rifle.length === 0) return;
     const sp = spatialize(this.lx, this.lz, this.lyaw, at[0], at[2]);
     if (sp.gain <= 0.001) return;
+    if (!this.allow('enemy-shot', 'combat', 50, 500)) return;
+    const dist = Math.hypot(at[0] - this.lx, at[2] - this.lz);
+    const cls = distanceClass(dist);
+    const delay = cls === 'near' ? 0 : propagationDelay(dist);
+    const play = (extraDelay: number, gain: number, lowpass: number) => {
+      const src = ctx.createBufferSource();
+      src.buffer = this.rifle[(Math.random() * this.rifle.length) | 0];
+      src.playbackRate.value = 0.9 + Math.random() * 0.14;
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = sp.pan;
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = lowpass;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      src.connect(g);
+      g.connect(pan);
+      pan.connect(lp);
+      lp.connect(this.impactBus);
+      src.start(ctx.currentTime + delay + extraDelay);
+    };
+    play(0, sp.gain * 0.75 * (cls === 'far' ? 0.85 : 1), cls === 'far' ? Math.min(sp.lowpass, 1400) : sp.lowpass);
+    if (cls === 'far') play(0.21, sp.gain * 0.22, 900); // the shot coming back off the ground and the hills
+  }
+
+  /** A round passing close to your head: a short high band sweeping down, panned to the side it passed. */
+  private whiz(point: Vec3, strength: number): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.allow('whiz', 'combat', 85, 300)) return;
+    const sp = spatialize(this.lx, this.lz, this.lyaw, point[0], point[2]);
+    const now = ctx.currentTime;
     const src = ctx.createBufferSource();
-    src.buffer = this.rifle[(Math.random() * this.rifle.length) | 0];
-    src.playbackRate.value = 0.9 + Math.random() * 0.14;
+    src.buffer = this.noise(0.22);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 3;
+    bp.frequency.setValueAtTime(5200, now);
+    bp.frequency.exponentialRampToValueAtTime(1700, now + 0.2);
+    const g = ctx.createGain();
+    // band-limited noise carries little energy: it needs a high gain to read as a close pass (measured)
+    g.gain.setValueAtTime(1.6 * strength, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
     const pan = ctx.createStereoPanner();
     pan.pan.value = sp.pan;
+    src.connect(bp).connect(g).connect(pan).connect(this.gunBus);
+    src.start(now);
+    src.stop(now + 0.24);
+  }
+
+  /** Someone walking nearby: a low thud from their position, only within earshot. */
+  enemyStep(at: [number, number, number]): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const dist = Math.hypot(at[0] - this.lx, at[2] - this.lz);
+    if (dist > 12) return;
+    if (!this.allow('enemy-step', 'combat', 45, 160)) return;
+    const sp = spatialize(this.lx, this.lz, this.lyaw, at[0], at[2]);
+    const now = ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise(0.06);
     const lp = ctx.createBiquadFilter();
     lp.type = 'lowpass';
-    lp.frequency.value = sp.lowpass;
+    lp.frequency.value = Math.min(sp.lowpass, 240 + Math.random() * 80);
     const g = ctx.createGain();
-    g.gain.value = sp.gain * 0.75; // sit a touch behind your own gun
-    src.connect(g);
-    g.connect(pan);
-    pan.connect(lp);
-    lp.connect(this.impactBus);
-    src.start();
+    g.gain.setValueAtTime(0.22 * sp.gain * (1 - dist / 14), now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    const pan = ctx.createStereoPanner();
+    pan.pan.value = sp.pan;
+    src.connect(lp).connect(g).connect(pan).connect(this.impactBus);
+    src.start(now);
+    src.stop(now + 0.09);
   }
 
   /** You got hit — a low body thud + a sharp sting, centred. */
   hurt(): void {
+    if (!this.allow('hurt', 'combat', 95, 250)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -657,7 +1015,7 @@ export class FpsAudio {
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.5, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
-    osc.connect(g).connect(this.uiBus);
+    osc.connect(g).connect(this.gunBus);
     osc.start(now);
     osc.stop(now + 0.22);
     const n = ctx.createBufferSource();
@@ -668,13 +1026,14 @@ export class FpsAudio {
     const ng = ctx.createGain();
     ng.gain.setValueAtTime(0.3, now);
     ng.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-    n.connect(hp).connect(ng).connect(this.uiBus);
+    n.connect(hp).connect(ng).connect(this.gunBus);
     n.start(now);
     n.stop(now + 0.09);
   }
 
   /** Low-HP heartbeat (lub-dub). The scene calls this on a cadence when hurt. */
   heartbeat(): void {
+    if (!this.allow('heartbeat', 'combat', 60, 450)) return;
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime;
@@ -687,7 +1046,7 @@ export class FpsAudio {
       g.gain.setValueAtTime(0.0001, now + t);
       g.gain.exponentialRampToValueAtTime(vol, now + t + 0.02);
       g.gain.exponentialRampToValueAtTime(0.001, now + t + 0.16);
-      o.connect(g).connect(this.uiBus);
+      o.connect(g).connect(this.gunBus);
       o.start(now + t);
       o.stop(now + t + 0.2);
     };
@@ -746,6 +1105,96 @@ export class FpsAudio {
   setBackgroundMuted(muted: boolean): void {
     this.backgroundMuted = muted;
     this.applyMix();
+    // A hidden, muted tab does no audio work at all.
+    if (muted) this.suspend('background'); else this.resume('background');
+  }
+
+  /** Reasons the graph is held. It runs only when there are none, so a key press while the pause
+   *  menu is open cannot restart it, and showing the tab cannot un-pause it. */
+  private holds = new Set<string>();
+
+  /** Stop the whole graph's clock (the pause menu, a hidden tab). Sounds freeze where they are. */
+  suspend(reason = 'app'): void {
+    this.holds.add(reason);
+    void this.ctx?.suspend?.();
+  }
+
+  /** Release one reason; the graph runs again once none remain. A no-op before the first gesture. */
+  resume(reason = 'app'): void {
+    this.holds.delete(reason);
+    if (this.holds.size === 0) void this.ctx?.resume?.();
+  }
+
+  /** Whether anything is holding the graph stopped. */
+  isHeld(): boolean {
+    return this.holds.size > 0;
+  }
+
+  /** Per-channel accumulators, filled in the audio thread between reads. */
+  private meterAcc: Record<string, { sumsq: number; n: number; peak: number }> | null = null;
+
+  /** Build the taps on first use, so normal play pays nothing. They accumulate on the audio thread
+   *  (an AudioWorklet), because a polled analyser only ever sees the tail of each rendered block and a
+   *  short sound can fall between two reads, and a main-thread tap drops blocks whenever a heavy
+   *  frame holds the page. Where worklets are missing it falls back to a ScriptProcessor. For probes
+   *  and the dev bench, never the shipped mix path. Readings are zero until the worklet has loaded. */
+  private ensureMeters(): void {
+    const ctx = this.ctx;
+    if (!ctx || this.meterAcc) return;
+    const acc: Record<string, { sumsq: number; n: number; peak: number }> = {};
+    this.meterAcc = acc;
+    const taps: [string, AudioNode][] = [
+      ['combat', this.combatDuck], ['environment', this.ambDuck], ['music', this.musicDuck], ['interactions', this.interactDuck],
+      ['ui', this.uiBus], ['radio', this.voiceBus], ['master', this.master],
+    ];
+    for (const [name] of taps) acc[name] = { sumsq: 0, n: 0, peak: 0 };
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    sink.connect(ctx.destination);
+    const fallback = () => {
+      for (const [name, node] of taps) {
+        const m = acc[name];
+        const proc = ctx.createScriptProcessor(1024, 1, 1);
+        proc.onaudioprocess = (e) => {
+          const d = e.inputBuffer.getChannelData(0);
+          for (let i = 0; i < d.length; i++) { const v = d[i]; m.sumsq += v * v; const av = v < 0 ? -v : v; if (av > m.peak) m.peak = av; }
+          m.n += d.length;
+        };
+        node.connect(proc);
+        proc.connect(sink);
+      }
+    };
+    const hasWorklet = !!ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined' && typeof Blob !== 'undefined' && typeof URL?.createObjectURL === 'function';
+    if (!hasWorklet) { fallback(); return; }
+    const code = 'class M extends AudioWorkletProcessor{constructor(){super();this.s=0;this.n=0;this.p=0}process(i){const c=i[0]&&i[0][0];if(c){for(let k=0;k<c.length;k++){const v=c[k];this.s+=v*v;const a=v<0?-v:v;if(a>this.p)this.p=a}this.n+=c.length;if(this.n>=2048){this.port.postMessage([this.s,this.n,this.p]);this.s=0;this.n=0;this.p=0}}return true}}registerProcessor("cz-meter",M)';
+    const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+    ctx.audioWorklet.addModule(url).then(() => {
+      for (const [name, node] of taps) {
+        const w = new AudioWorkletNode(ctx, 'cz-meter');
+        w.port.onmessage = (e: MessageEvent<number[]>) => { const m = acc[name]; m.sumsq += e.data[0]; m.n += e.data[1]; if (e.data[2] > m.peak) m.peak = e.data[2]; };
+        node.connect(w);
+        w.connect(sink);
+      }
+    }).catch(fallback).finally(() => URL.revokeObjectURL(url));
+  }
+
+  /** The RMS level (0..1) of each channel since the last read, after ducking. The first call only
+   *  starts the meters. For probes and the dev bench. */
+  levels(): Record<string, number> {
+    if (!this.ctx) return {};
+    this.ensureMeters();
+    const out: Record<string, number> = {};
+    for (const [k, m] of Object.entries(this.meterAcc!)) { out[k] = m.n ? Math.sqrt(m.sumsq / m.n) : 0; m.sumsq = 0; m.n = 0; }
+    return out;
+  }
+
+  /** The loudest single sample (0..1) of each channel since the last read: what a short sound reaches. */
+  peaks(): Record<string, number> {
+    if (!this.ctx) return {};
+    this.ensureMeters();
+    const out: Record<string, number> = {};
+    for (const [k, m] of Object.entries(this.meterAcc!)) { out[k] = m.peak; m.peak = 0; }
+    return out;
   }
 
   private applyMix(): void {
@@ -757,8 +1206,10 @@ export class FpsAudio {
     set(this.gunBus, 0.9 * this.mix.effects);
     set(this.impactBus, 0.9 * this.mix.effects);
     set(this.uiBus, this.mix.ui);
+    set(this.interactBus, this.mix.interactions);
     set(this.voiceBus, this.mix.voice);
     set(this.ambBus, this.ambTarget);
+    set(this.envBus, this.mix.ambience);
     // MusicLayers is mixed hot (it was written to sit alone); 0.6 seats it under the fight.
     set(this.musicBus, 0.6 * this.mix.music);
   }
@@ -846,18 +1297,32 @@ export class FpsAudio {
     this.setDrone(cfg.drone);
   }
 
-  /** Duck the ambience under a loud event, then let it swell back. */
-  private duck(amount: number, seconds: number): void {
+  /** Dip a duck stage to (1 - amount) and let it swell back over `seconds`. */
+  private dip(node: GainNode | undefined, amount: number, seconds: number): void {
     const ctx = this.ctx;
-    if (!ctx) return;
-    const g = this.ambBus.gain;
+    if (!ctx || !node) return;
     const now = ctx.currentTime;
+    const g = node.gain;
     g.cancelScheduledValues(now);
-    g.setValueAtTime(Math.max(0, this.ambTarget * (1 - amount)), now);
-    g.linearRampToValueAtTime(this.ambTarget, now + seconds + 0.25);
+    g.setValueAtTime(Math.max(0, 1 - amount), now);
+    g.linearRampToValueAtTime(1, now + seconds + 0.25);
   }
 
-  private tick(freq: number, vol: number, delay: number): void {
+  /** Duck the ambience under a loud event, then let it swell back. */
+  private duck(amount: number, seconds: number): void {
+    this.dip(this.ambDuck, amount, seconds);
+  }
+
+  /** A radio line owns the mix: music, combat and handling dip rather than vanish, and the room
+   *  tone eases back, so the voice is clear and the world is still there. */
+  private radioDuck(seconds: number): void {
+    this.dip(this.musicDuck, 0.55, seconds);
+    this.dip(this.combatDuck, 0.35, seconds);
+    this.dip(this.interactDuck, 0.3, seconds);
+    this.duck(0.5, seconds);
+  }
+
+  private tick(freq: number, vol: number, delay: number, bus?: GainNode): void {
     const ctx = this.ctx;
     if (!ctx) return;
     const now = ctx.currentTime + delay;
@@ -870,7 +1335,7 @@ export class FpsAudio {
     const g = ctx.createGain();
     g.gain.setValueAtTime(vol, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-    src.connect(bp).connect(g).connect(this.uiBus);
+    src.connect(bp).connect(g).connect(bus ?? this.uiBus);
     src.start(now);
     src.stop(now + 0.05);
   }

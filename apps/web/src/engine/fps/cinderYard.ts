@@ -75,6 +75,11 @@ export const CINDER_YARD: LevelDef = {
     // inside the arms shed and the control room
     { x: -27, z: -46, w: 0.9, d: 6, h: 2.6, kind: 'rack' }, { x: -21, z: -46, w: 0.9, d: 6, h: 2.6, kind: 'rack' },
     { x: 23, z: -46.5, w: 4, d: 0.8, h: 0.9, kind: 'desk' }, { x: 28.5, z: -40, w: 0.8, d: 2.2, h: 2.2, kind: 'server' },
+    // drums stacked by the pump skids, and by the arms shed door
+    { x: -3.2, z: 6.8, w: 0.6, d: 0.6, h: 0.95, kind: 'drum' }, { x: -2.4, z: 7.4, w: 0.6, d: 0.6, h: 0.95, kind: 'drum' }, { x: -3.0, z: 7.7, w: 0.6, d: 0.6, h: 0.95, kind: 'drum' },
+    { x: -19.6, z: -35.2, w: 0.6, d: 0.6, h: 0.95, kind: 'drum' }, { x: -18.8, z: -35.2, w: 0.6, d: 0.6, h: 0.95, kind: 'drum' },
+    // control room: consoles and a lockers bank
+    { x: 28.4, z: -46, w: 0.9, d: 3.4, h: 1.0, kind: 'console' }, { x: 17, z: -48, w: 0.7, d: 2.4, h: 1.9, kind: 'locker' },
     // north-east: the flare stack's base
     { x: 25, z: -53, w: 2.6, d: 2.6, h: 2.4, kind: 'concrete' },
   ],
@@ -82,16 +87,20 @@ export const CINDER_YARD: LevelDef = {
     { kind: 'road', x: 0, z: 2, w: 7, d: 36 },
     { kind: 'stripe', x: 0, z: 12.2, w: 8, d: 0.25 },
     { kind: 'light_pole', x: -12, z: 9 }, { kind: 'light_pole', x: 11, z: -15 }, { kind: 'light_pole', x: -2, z: -40 },
-    { kind: 'pipe', x: 0, z: -30, w: 11, h: 7 }, { kind: 'pipe', x: 0, z: -31.2, w: 11, h: 9.5 },
+    { kind: 'pipe', x: 0, z: -30, w: 11, h: 8.6 }, { kind: 'pipe', x: 0, z: -31.2, w: 11, h: 10.4 },
     { kind: 'pipe', x: -20, z: -2.5, w: 0.6, d: 4, h: 4.5 }, { kind: 'pipe', x: 17, z: -2.5, w: 0.6, d: 5, h: 4 },
     { kind: 'pipe', x: -13, z: -3, w: 7, h: 3.2 }, { kind: 'pipe', x: 11, z: 0, w: 6, h: 3.2 },
-    { kind: 'catwalk', x: 0, z: -28.5, w: 11, h: 5.5, d: 1.2 },
-    { kind: 'catwalk', x: -7, z: -24, w: 1.2, h: 5.5, d: 8 },
+    // the walkway between the columns: walkable (decks/stairs below), reached by the stair on the lane
+    { kind: 'catwalk', x: 0, z: -28.5, w: 11, h: 4.8, d: 1.2 },
     { kind: 'roof', x: 0, z: -46.5, w: 14, d: 11, h: 6.5 },
     { kind: 'roof', x: -24, z: -45, w: 12.4, d: 14.4, h: 3.4 },
     { kind: 'roof', x: 23, z: -43, w: 14.4, d: 14.4, h: 3.4 },
     { kind: 'stack', x: 25, z: -53, h: 22 },
     { kind: 'steam', x: -11, z: -13 }, { kind: 'steam', x: 21.5, z: -13 }, { kind: 'steam', x: 3, z: -33 },
+    { kind: 'steam', x: -7.5, z: -3.4 }, { kind: 'steam', x: 17, z: -5 },
+    // valve wheels on the pipework, and the manifold's marker
+    { kind: 'valve', x: -13, z: -3, h: 3.4 }, { kind: 'valve', x: 11, z: 0, h: 3.4 }, { kind: 'valve', x: 0, z: -30, h: 7.2 },
+    { kind: 'sign', x: 0, z: 12.4, h: 3.2, w: 5, color: '#ffb020' },
     { kind: 'beacon', x: 7, z: 17, h: 3.4, color: '#ffb020' }, { kind: 'beacon', x: -7, z: -28, h: 16.4 }, { kind: 'beacon', x: 7, z: -28, h: 16.4 },
     { kind: 'lamp', x: 23, z: -43, h: 3.2 }, { kind: 'lamp', x: -24, z: -45, h: 3.2 },
     { kind: 'camera', x: 6, z: 13.3, h: 3.2 },
@@ -121,4 +130,7 @@ export const CINDER_YARD: LevelDef = {
   },
   floor: { kind: 'concrete' },
   shadowHalf: 50,
+  // The catwalk between the fractionation columns, and the stair that climbs to it from the lane.
+  decks: [{ x: 0, z: -28.5, w: 11, d: 1.2, h: 4.8 }],
+  stairs: [{ x: 3, z: -24.2, w: 2, d: 7.6, h: 4.8, rise: '-z' }],
 }

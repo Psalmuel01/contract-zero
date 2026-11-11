@@ -1,10 +1,16 @@
 'use client'
 
+import { useMusicState } from '@/components/audio/AudioProvider'
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Panel, Shell, Stat } from '@/components/ui/Shell'
 import { NewSupplyOrder, OrderBoard, TradingPartners, useMarket } from '@/components/market/SupplyOrders'
+import { GunStatBars } from '@/components/armory/GunStatBars'
+import { Tabs } from '@/components/ui/Tabs'
+import { countOrders } from '@/lib/market/orders'
+import { ScreenTip } from '@/components/help/ScreenTip'
+import { AdvancedSwitch, ExchangeAdvanced } from '@/components/help/AdvancedView'
 import { IntentsPanel } from '@/components/market/IntentsPanel'
 import dynamic from 'next/dynamic'
 import { api, RESOURCE_LABEL, type ArmoryItem, type ExchangePrice, type PlayerQuote, type ResourceName, type Standing } from '@/lib/api'
@@ -39,6 +45,7 @@ function Armory({ items, canTrade, busy, onBuy }: { items: ArmoryItem[]; canTrad
               {g.price < g.list_price && <span className="ml-2 text-xs text-muted line-through">{g.list_price.toLocaleString()}</span>}
               <span className="ml-2 text-xs text-muted">{g.stock > 0 ? `${g.stock} in the armory` : 'sold out · restocks within 12 hours'}</span>
             </div>
+            <GunStatBars gun={g.id as GunId} compact />
             <div className="text-[11px] text-dim">token <code>{g.token}</code></div>
             <div className="mt-auto flex gap-2">
               <button className="cz-btn cz-btn-primary flex-1 px-4 py-1.5 text-sm" disabled={!canTrade || busy || g.stock < 1} onClick={() => onBuy(g.id)}>
@@ -166,6 +173,7 @@ function Row({ p, canTrade, busy, onQuote }: { p: ExchangePrice; canTrade: boole
 }
 
 export default function Exchange() {
+  useMusicState('table')
   const qc = useQueryClient()
   const { session, loading } = useSession()
   const [ticket, setTicket] = useState<Ticket | null>(null)
@@ -249,6 +257,11 @@ export default function Exchange() {
 
   return (
     <Shell title="Exchange" back={{ href: '/', label: 'Hub' }}>
+      <ScreenTip tip="exchange" title="How the Exchange works">
+        <p>Quick trade sells your haul at once at the posted price. <b className="text-fog">Supply orders</b> are different: a faction short of stock posts an order, and the trading partners each answer with their own offer from their own shelves. Only real offers are listed.</p>
+        <p>Open any order to follow it: shortage, order, bids, winner, settlement, arrival, readiness. A step that has not happened yet says it is waiting, and a payment is only marked confirmed when the chain says so.</p>
+      </ScreenTip>
+      <div className="mb-3 flex justify-end"><AdvancedSwitch /></div>
       {ex.isError && <p className="mb-4 text-hostile">The economy server is not reachable.</p>}
 
       {!session && (
@@ -280,19 +293,6 @@ export default function Exchange() {
       )}
 
       {session && onChain && session.method !== 'dev' && <QuickTrade enabled={quick} onChange={() => setQuick(!!loadSessionKey(session.account))} />}
-
-      {ex.data && ex.data.shortages.length > 0 && (
-        <Panel title="MARKET SIGNALS" className="mt-4">
-          <ul className="space-y-1 text-sm">
-            {ex.data.shortages.map((s) => (
-              <li key={`${s.actor}-${s.resource}`} className="text-slate-300">
-                <span className="font-semibold text-amber-400">{s.name}</span> is {s.short} {s.resource} short of its target ({s.have}/{s.target}). Its commander will buy from Vex, pushing the {s.resource} price up.{' '}
-                <Link href="/contracts" className="text-amber-hi hover:underline">Raid its depots</Link> to deepen the shortage, or sell {s.resource} to Vex while the price is high.
-              </li>
-            ))}
-          </ul>
-        </Panel>
-      )}
 
       {ticket && q && (
         <Panel title="QUOTE" className="mt-4 !border-amber/50">
@@ -333,6 +333,21 @@ export default function Exchange() {
 
       {error && <p className="mt-4 text-sm text-hostile">{error}</p>}
 
+      <Tabs label="Exchange sections" tabs={[
+        { id: 'trade', label: 'Trade', panel: <>
+      {ex.data && ex.data.shortages.length > 0 && (
+        <Panel title="MARKET SIGNALS" className="mt-4">
+          <ul className="space-y-1 text-sm">
+            {ex.data.shortages.map((s) => (
+              <li key={`${s.actor}-${s.resource}`} className="text-slate-300">
+                <span className="font-semibold text-amber-400">{s.name}</span> is {s.short} {s.resource} short of its target ({s.have}/{s.target}). Its commander will buy from Vex, pushing the {s.resource} price up.{' '}
+                <Link href="/contracts" className="text-amber-hi hover:underline">Raid its depots</Link> to deepen the shortage, or sell {s.resource} to Vex while the price is high.
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
+
       {ex.data && (
         <Panel title={`MARKET · ${ex.data.merchant.name.toUpperCase()}`} className="mt-4">
           {ex.data.merchant.insolvent && <p className="mb-2 text-sm text-amber-400">Vex is below its credit reserve and not buying.</p>}
@@ -340,19 +355,6 @@ export default function Exchange() {
             <Row key={p.resource} p={p} canTrade={canTrade} busy={!!ticket && ticket.phase !== 'settled' && left > 0} onQuote={requestQuote} />
           ))}
           {!canTrade && <p className="mt-2 text-xs text-muted">Sign in to trade.</p>}
-        </Panel>
-      )}
-
-      {market.data && <TradingPartners m={market.data} />}
-      {market.data && <NewSupplyOrder m={market.data} session={session} onDone={(m) => { setOrderMsg(m); market.refetch() }} />}
-      {orderMsg && <p className="mt-2 text-sm text-friendly" role="status" data-testid="order-msg">{orderMsg}</p>}
-      {market.data && <OrderBoard m={market.data} session={session} onDone={(m) => { setOrderMsg(m); market.refetch() }} />}
-      <IntentsPanel />
-
-      {ex.data?.armory && (
-        <Panel title="ARMORY · OWNED GEAR" className="mt-4">
-          <p className="mb-3 text-sm text-muted">Guns you buy here are yours: a token in your account, carried into any contract from the loadout. Standard issue (SMG, assault rifle) is always free.</p>
-          <Armory items={ex.data.armory} canTrade={canTrade} busy={!!ticket && ticket.phase !== 'settled' && left > 0} onBuy={requestGear} />
         </Panel>
       )}
 
@@ -365,6 +367,28 @@ export default function Exchange() {
           </ul>
         </Panel>
       )}
+        </> },
+        { id: 'orders', label: 'Supply orders', badge: market.data ? countOrders(market.data.orders).open : undefined, panel: <>
+      {market.data && <NewSupplyOrder m={market.data} session={session} onDone={(m) => { setOrderMsg(m); market.refetch() }} />}
+      {orderMsg && <p className="mt-2 text-sm text-friendly" role="status" data-testid="order-msg">{orderMsg}</p>}
+      {market.data && <OrderBoard m={market.data} session={session} onDone={(m) => { setOrderMsg(m); market.refetch() }} />}
+      <IntentsPanel />
+
+        </> },
+        { id: 'partners', label: 'Trading partners', panel: <>
+      {market.data && <ExchangeAdvanced m={market.data} />}
+      {market.data && <TradingPartners m={market.data} />}
+        </> },
+        { id: 'armory', label: 'Armory', panel: <>
+      {ex.data?.armory && (
+        <Panel title="ARMORY · OWNED GEAR" className="mt-4">
+          <p className="mb-3 text-sm text-muted">Guns you buy here are yours: a token in your account, carried into any contract from the loadout. Standard issue (SMG, assault rifle) is always free.</p>
+          <Armory items={ex.data.armory} canTrade={canTrade} busy={!!ticket && ticket.phase !== 'settled' && left > 0} onBuy={requestGear} />
+        </Panel>
+      )}
+
+        </> },
+      ]} />
     </Shell>
   )
 }

@@ -20,12 +20,14 @@ import {
 import { bindLabel } from '@/lib/keybinds'
 import { useSyncState } from '@/lib/preferencesSync'
 import { resetTips } from '@/lib/tutorial'
-import { FpsAudio } from '@/engine/audio'
+import { useAdvanced } from '@/lib/advanced'
+import type { FpsAudio } from '@/engine/audio'
+import { acquireAudio, releaseAudio } from '@/engine/audio/shared'
 
 type Cat = 'display' | 'audio' | 'controls' | 'keys' | 'interface' | 'access' | 'account'
 const CATS: { id: Cat; code: string; label: string; blurb: string; icon: ReactNode }[] = [
   { id: 'display', code: '01', label: 'Display', blurb: 'Quality, resolution, frame rate and effects. Staged: apply to take effect.', icon: <><rect x="3" y="4" width="18" height="12" /><path d="M8 20h8M12 16v4" /></> },
-  { id: 'audio', code: '02', label: 'Audio', blurb: 'Six channels, each live. Test plays a sample through that channel.', icon: <path d="M4 10v4h4l5 4V6L8 10zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" /> },
+  { id: 'audio', code: '02', label: 'Audio', blurb: 'Seven channels, each live. Test plays a sample through that channel.', icon: <path d="M4 10v4h4l5 4V6L8 10zM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12" /> },
   { id: 'controls', code: '03', label: 'Controls', blurb: 'Look speed, aiming and whether keys are held or pressed once.', icon: <><rect x="6" y="3" width="12" height="18" rx="6" /><path d="M12 7v4" /></> },
   { id: 'keys', code: '04', label: 'Key bindings', blurb: 'Every keyboard action, two keys each, with conflicts handled.', icon: <><rect x="2" y="6" width="20" height="12" /><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" /></> },
   { id: 'interface', code: '05', label: 'Interface', blurb: 'Crosshair, HUD size, markers and feedback.', icon: <><circle cx="12" cy="12" r="7" /><path d="M12 2v5M12 17v5M2 12h5M17 12h5" /></> },
@@ -322,33 +324,36 @@ function PerfInfo({ plan, preset }: { plan: ReturnType<typeof renderPlan>; prese
 const MIX: { key: keyof AudioMix; label: string; hint: string }[] = [
   { key: 'master', label: 'Master', hint: 'Everything' },
   { key: 'music', label: 'Music', hint: 'The score: a drone, a pulse when you’re spotted, the theme under fire' },
-  { key: 'effects', label: 'Effects', hint: 'Gunfire, impacts, explosions' },
-  { key: 'voice', label: 'Voice and radio', hint: 'Briefings and radio chatter' },
-  { key: 'ambience', label: 'Ambience', hint: 'Wind, room tone, refinery machinery' },
-  { key: 'ui', label: 'Interface', hint: 'Pickups, beeps, reload clicks, countdowns' },
+  { key: 'effects', label: 'Combat', hint: 'Gunfire, impacts, explosions, alarms, damage and heartbeat' },
+  { key: 'voice', label: 'Radio and dialogue', hint: 'Briefings and radio chatter' },
+  { key: 'ambience', label: 'Environment', hint: 'Wind, room tone, machinery, the sounds of the site' },
+  { key: 'interactions', label: 'Interactions', hint: 'Reloads, pickups, footsteps, handling' },
+  { key: 'ui', label: 'Interface', hint: 'Hit markers, countdown beeps, menu feedback' },
 ]
 
 function Audio({ s, set }: { s: Settings; set: SetFn }) {
   const audio = useRef<FpsAudio | null>(null)
   const musicStop = useRef<ReturnType<typeof setTimeout> | null>(null)
-  useEffect(() => () => { audio.current?.dispose(); if (musicStop.current) clearTimeout(musicStop.current) }, [])
+  // The app's one audio engine, shared with every other screen: Test plays through it, so what you hear is the real mix.
+  useEffect(() => () => { if (audio.current) { audio.current.setMusicOverride(null); audio.current.setZone('NONE'); releaseAudio() } if (musicStop.current) clearTimeout(musicStop.current) }, [])
   useEffect(() => { audio.current?.setMix(s.audio) }, [s.audio])
   const test = (k: keyof AudioMix) => {
-    audio.current ??= new FpsAudio()
+    audio.current ??= acquireAudio()
     const a = audio.current
     a.unlock()
     if (k === 'music') {
-      // A few bars of the score at combat intensity, then quiet again.
+      // A few bars of the score at combat intensity, then back to whatever this screen plays (nothing).
       a.setMix(s.audio)
-      a.setMusicIntensity(2)
+      a.setMusicOverride('combat')
       if (musicStop.current) clearTimeout(musicStop.current)
-      musicStop.current = setTimeout(() => a.setMix({ ...s.audio, music: 0 }), 6000)
+      musicStop.current = setTimeout(() => a.setMusicOverride(null), 6000)
       return
     }
-    a.setMix({ ...s.audio, music: 0 })
+    a.setMusicOverride(null)
     if (k === 'effects' || k === 'master') a.explosion([0, 1, -6])
     else if (k === 'voice') a.vo('dyn-settings-test', 'handler')
-    else if (k === 'ambience') a.alarm(1.5)
+    else if (k === 'ambience') { a.setZone('CINDER_YARD'); setTimeout(() => a.setZone('NONE'), 4000) }
+    else if (k === 'interactions') { a.reloadStart(); setTimeout(() => a.reloadDone(), 450) }
     else a.beep(true)
   }
   return (
@@ -410,6 +415,7 @@ function Controls({ s, set }: { s: Settings; set: SetFn }) {
 function Interface({ s, set }: { s: Settings; set: SetFn }) {
   const ui = s.interface
   const [tipsReset, setTipsReset] = useState(false)
+  const [advanced, setAdvanced] = useAdvanced()
   const ch = ui.crosshair
   const setUi = (patch: Partial<Settings['interface']>) => set((x) => ({ ...x, interface: { ...x.interface, ...patch } }))
   const setCh = (patch: Partial<Settings['interface']['crosshair']>) => set((x) => ({ ...x, interface: { ...x.interface, crosshair: { ...x.interface.crosshair, ...patch } } }))
@@ -450,6 +456,9 @@ function Interface({ s, set }: { s: Settings; set: SetFn }) {
         <Row label="First-time tips" hint="One short line, the first time you fight, pick something up, carry cargo, extract and finish a contract. Never covers the fight; fades on its own.">
           <Switch id="tips" checked={ui.tips} onChange={(v) => setUi({ tips: v })} label="First-time tips" />
           <Button onClick={() => { resetTips(); setTipsReset(true) }} testid="tips-reset">{tipsReset ? 'Will show again' : 'Replay tips'}</Button>
+        </Row>
+        <Row label="Advanced view" hint="On the Exchange and War Room, also show the order contract, transaction ids and the engine's validation record. The plain account always comes first.">
+          <Switch id="advanced-view" checked={advanced} onChange={setAdvanced} label="Advanced view" />
         </Row>
         <Row label="Interaction hints" hint={`The second line under a prompt (“${bindLabel(s.controls.binds, 'inspect')} · INSPECT”).`}>
           <Switch id="prompt-hints" checked={ui.promptHints} onChange={(v) => setUi({ promptHints: v })} label="Interaction hints" />

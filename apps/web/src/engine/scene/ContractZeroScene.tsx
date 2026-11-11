@@ -19,15 +19,18 @@ import {
   xpForKill, rankForXp, xpIntoRank, xpBarSize, rankUpsBetween, careerXpFor, XP_REWARD, rayAABB, aabbOfCover, slideMove, type FpsInput, type Vec3, type Rank, type Attachment,
 } from '../fps';
 import { RANK_COLORS } from '../../lib/constants';
-import { linesFor, SPEAKER_META, type PresenceLine, type PresenceTrigger, type Speaker } from '../story/presence';
+import { linesFor, reinforcementLine, SPEAKER_META, type PresenceLine, type PresenceTrigger, type Speaker } from '../story/presence';
 import { GUN_FEEL } from '../combat/GunFeel';
 import { STARTER_GUN_ID, getGun, type GunId } from '../combat/GunStats';
 import type { AmmoId, AttachmentId, AttachmentSlot } from '../combat/Loadout';
-import { FpsAudio } from '../audio';
+import { ambienceKey, type FpsAudio } from '../audio';
+import { acquireAudio, releaseAudio } from '../audio/shared';
+import { worldClock } from '../fps/lineProps';
 import { computeEdgeArrow } from '../verb/threatArrow';
 import { useGunPrototypes, ALL_GUN_IDS, GUN_LENGTH } from './gunModels';
 import { OperatorRig, type OperatorApi } from './OperatorRig';
 import { LEVELS } from '../fps/levels';
+import { groundHeight, railedMove } from '../fps/decks';
 import { LevelArt } from './LevelArt';
 import { FieldProps } from './FieldProps';
 import { ItemInspector } from '@/components/inspect/ItemInspector';
@@ -897,6 +900,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const adsCur = useRef(0);
   const leanCur = useRef(0);
   const crouchCur = useRef(0);
+  /** How high the floor under the player is: 0 on the ground, up to a catwalk's height on stairs and decks (fps/decks). */
+  const floorY = useRef(0);
   const bobPhase = useRef(0);
   const footstepAt = useRef(0);
   const swayT = useRef(0); // bodycam handheld drift (slice 7)
@@ -905,10 +910,12 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   // decides anything — the materials below are triplanar and derive their texture
   // coordinates from world position — but it is still what a non-triplanar reader
   // of these maps would get, so it stays truthful.
-  const floorMaps = usePbr('burned_ground_01', [12, 20]);
-  const brickMaps = usePbr('broken_brick_wall', [7, 1.6]);
-  const plasterMaps = usePbr('damaged_plaster', [4, 1.4]);
-  const plankMaps = usePbr('black_painted_planks', [1, 1]);
+  // Touch and minimal tiers load colour maps only (two thirds less texture memory; see usePbr).
+  const colourOnly = lowSpec || minimal;
+  const floorMaps = usePbr('burned_ground_01', [12, 20], undefined, colourOnly);
+  const brickMaps = usePbr('broken_brick_wall', [7, 1.6], undefined, colourOnly);
+  const plasterMaps = usePbr('damaged_plaster', [4, 1.4], undefined, colourOnly);
+  const plankMaps = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
 
   /**
    * World-space materials for the level shell.
@@ -1132,6 +1139,11 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const fieldToast = useRef<{ text: string; until: number; color: string }>({ text: '', until: 0, color: '#e9edf2' });
   const lastFieldHtml = useRef('');
   const lastBeep = useRef(-1);
+  // Audio cues that fire once per run, and where each guard last was (for footsteps).
+  const alertedRef = useRef(false);
+  const lastSaid = useRef(new Map<string, number>());
+  const finalAlarmRef = useRef(false);
+  const enemyStepRef = useRef(new Map<number, { x: number; z: number; t: number }>());
   const lastHeartbeat = useRef(0);
   /** Guards' weapons still falling: field item id → its tumble physics. */
   const enemyDrops = useRef(new Map<string, DroppedWeapon>());
@@ -1459,7 +1471,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   // Load this op's ambience bed (retunes the room tone + zone drone; the mission
   // remounts per op, so this fires whenever the zone changes).
-  useEffect(() => { audio.setZone(mission.zone); }, [audio, mission.zone]);
+  useEffect(() => { audio.setZone(ambienceKey(mission.zone, mission.level)); }, [audio, mission.zone, mission.level]);
+  // The level's roofs: indoors and outdoors sound different (reverb follows the listener).
+  useEffect(() => { audio.setLevel(LEVEL, mission.cues ?? null); return () => audio.setLevel(null); }, [audio, LEVEL, mission.cues]);
   // The refinery runs while you fight in it.
   useEffect(() => { audio.setMachinery(mission.level === 'cinder_yard'); return () => audio.setMachinery(false); }, [audio, mission.level]);
 
@@ -1536,6 +1550,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       pitch: +staggerP.current.toFixed(4), yaw: +staggerY.current.toFixed(4), shake: +shake.current.toFixed(4),
     });
     w.__czColliders = () => COLLIDERS;
+    w.__czFloor = () => ({ floor: +floorY.current.toFixed(3), x: +pos.current.x.toFixed(2), z: +pos.current.z.toFixed(2), eye: +camera.position.y.toFixed(3) });
     w.__czCam = () => ({ x: +camera.position.x.toFixed(3), z: +camera.position.z.toFixed(3), fov: +(camera as THREE.PerspectiveCamera).fov.toFixed(1), roll: +camera.rotation.z.toFixed(4), pitch: +pitch.current.toFixed(4), yaw: +yaw.current.toFixed(4) });
     // Draw calls and triangles per frame, counted across every pass (post-processing
     // resets the renderer's counters each pass, so the default reading is the last quad).
@@ -1559,6 +1574,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     };
     // audition any presence line (also lets us verify which ids have a recording)
     w.__czVo = (id: string, speaker: Speaker) => audio.vo(id, speaker);
+    w.__czAudio = audio; // probes: levels(), stats(), and driving sounds from a headless run
     w.__czSetXp = (n: number) => { careerXp.current = n; try { window.localStorage.setItem(XP_KEY, String(n)); } catch { /* ignore */ } };
     // headless: wound the live boss to a fraction of its health, to drive phases
     w.__czHurtBoss = (frac: number) => {
@@ -1601,8 +1617,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     };
     return () => {
       delete w.__czState; delete w.__czKillAll; delete w.__czKillRoom; delete w.__czKillPlayer; delete w.__czAim; delete w.__czAudio;
-      delete w.__czMission; delete w.__czEndless; delete w.__czWarp; delete w.__czSkipBriefing;
-      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czToggle;
+      delete w.__czMission; delete w.__czEndless; delete w.__czWarp; delete w.__czSkipBriefing; delete w.__czFloor;
+      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czToggle;
       delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats;
     };
   }, [sim, audio]);
@@ -1702,7 +1718,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     {
       const cam = frame.camera;
       const vw = frame.size.width, vh = frame.size.height;
-      const eyeY = THREE.MathUtils.lerp(EYE_STAND, EYE_CROUCH, crouchCur.current);
+      const eyeY = floorY.current + THREE.MathUtils.lerp(EYE_STAND, EYE_CROUCH, crouchCur.current);
       const px = pos.current.x, pz = pos.current.z;
 
       const project = (ex: number, ez: number): { x: number; y: number } | null => {
@@ -1789,7 +1805,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     const assist = cs?.access.aimAssist ?? 'touch';
     const assistOn = assist === 'always' || (assist === 'touch' && lowSpec);
     if (assistOn && lockTarget.current == null && (ct.fire || actHeld('fire') || mouseBtn.current.has(0) || adsCur.current > 0.35)) {
-      const eyeApprox = THREE.MathUtils.lerp(EYE_STAND, EYE_CROUCH, crouchCur.current);
+      const eyeApprox = floorY.current + THREE.MathUtils.lerp(EYE_STAND, EYE_CROUCH, crouchCur.current);
       const px = pos.current.x, pz = pos.current.z;
       let bestDiff = 0.3; // ~17° acquisition cone
       let tYaw = 0, tPitch = 0, found = false;
@@ -1852,7 +1868,14 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     const swayYaw = Math.sin(swayT.current * 0.63) * 0.0038 * swayAmt;
     const swayRoll = Math.sin(swayT.current * 0.51) * 0.0075 * swayAmt;
 
-    const eyeY = THREE.MathUtils.lerp(EYE_STAND, EYE_CROUCH, crouchCur.current)
+    // The floor follows stairs and decks (steeply up, a little slower on the way down).
+    {
+      const want = LEVEL ? groundHeight(LEVEL, pos.current.x, pos.current.z) : 0;
+      const k = want > floorY.current ? 16 : 9;
+      floorY.current += (want - floorY.current) * Math.min(1, dt * k);
+      if (Math.abs(want - floorY.current) < 0.002) floorY.current = want;
+    }
+    const eyeY = floorY.current + THREE.MathUtils.lerp(EYE_STAND, EYE_CROUCH, crouchCur.current)
       + Math.sin(swayT.current * 2.1) * 0.011 * swayAmt;
     const lean = leanCur.current;
     const cam = camera as THREE.PerspectiveCamera;
@@ -2121,7 +2144,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         const from = tmp2.set(ev.from[0], ev.from[1], ev.from[2]);
         spawnBeam(from, ev.impact, true);                          // the line from their gun to you
         spawnBullet(from, ev.impact, ev.hit, true, ev.normal);     // and the round travelling down it
-        audio.enemyShot(ev.from); // spatialised: you hear the direction
+        audio.enemyShot(ev.from, { impact: ev.impact, hit: ev.hit }); // spatialised, delayed and dulled when far; a miss that passes close is heard going by
       } else if (ev.kind === 'playerHit') {
         // A round landing should MOVE you: the head snaps, the view rolls, and
         // you're shoved off the axis you were shot from.
@@ -2739,7 +2762,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         // Keep the pressure up — trickle reinforcements in until the clock runs out.
         if (holdProgress.current < hold && sim.time - lastReinforceAt.current > (obj.reinforceEvery ?? 3.5)) {
           lastReinforceAt.current = sim.time;
-          sim.reinforce(obj.reinforceRoom ?? obj.room ?? 0, obj.reinforceCount ?? 2);
+          reinforced(sim.reinforce(obj.reinforceRoom ?? obj.room ?? 0, obj.reinforceCount ?? 2));
         }
         done = holdProgress.current >= hold;
       } else if (obj.kind === 'secure' || obj.kind === 'plant' || obj.kind === 'retrieve' || obj.kind === 'extract') {
@@ -2750,7 +2773,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           : near;
         if (working && (obj.reinforceCount ?? 0) > 0 && sim.time - lastReinforceAt.current > (obj.reinforceEvery ?? 3.5)) {
           lastReinforceAt.current = sim.time;
-          sim.reinforce(obj.reinforceRoom ?? obj.room ?? 0, obj.reinforceCount ?? 2);
+          reinforced(sim.reinforce(obj.reinforceRoom ?? obj.room ?? 0, obj.reinforceCount ?? 2));
         }
         if (obj.kind === 'secure') done = FIELD.carried.length >= Math.min(FIELD.cases.length, CARRY_MAX) || FIELD.exfilPhase === 'counting' || FIELD.exfilPhase === 'done';
         else if (obj.kind === 'plant') done = FIELD.planted.includes(obj.item ?? '');
@@ -2857,6 +2880,18 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     fieldToast.current = { text, color, until: performance.now() + 2600 };
   }
 
+  // What the site's economy is doing, said once at the start: a line that is down, a delivery landing.
+  useEffect(() => {
+    const cues = mission.cues;
+    if (!cues) return;
+    const msgs = [
+      ...cues.lines_down.map((l) => `${l.line.toUpperCase()} IS DOWN · BACK ${worldClock(l.until)}`),
+      ...(cues.deliveries.length ? ['A SHIPMENT IS LANDING HERE'] : []),
+    ];
+    const timers = msgs.map((m, i) => setTimeout(() => toast(m, '#ff8a5a'), 2500 + i * 3200));
+    return () => timers.forEach(clearTimeout);
+  }, [mission.cues]);
+
   /** Nothing solid between two points (walls, crates, vehicles). */
   function losClear(a: [number, number, number], b: [number, number, number]): boolean {
     const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
@@ -2908,7 +2943,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         say('chargePlaced');
         if (fe.planted >= fe.total) {
           toast('BOTH CHARGES SET · FUSE LIT · GET CLEAR', '#ff8a5a');
-          audio.alarm(5);
+          audio.alarm(5, 2); // the fuse is lit
           sim.setRoomActive(1, true); sim.setRoomActive(2, true);
         } else toast(`CHARGE SET · ${fe.planted}/${fe.total}`, '#ff8a5a');
         break;
@@ -2924,18 +2959,21 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         }
         say('detonation');
         toast('THE LINE IS BURNING', '#ff8a5a');
-        sim.reinforce(2, 2);
+        reinforced(sim.reinforce(2, 2));
         break;
       case 'extractCalled':
         say('extractCalled');
+        audio.extractCall(); audio.setExtraction(true);
         toast(FIELD.spec.exfil?.mode === 'handover' ? 'HANDOVER SIGNALLED · HOLD THE ZONE' : 'EXTRACTION CALLED · HOLD THE ZONE', '#5fe0a8');
         break;
       case 'extractLeft':
         say('extractBroken');
+        audio.extractLeft(); audio.setExtraction(false);
         toast('OUTSIDE THE ZONE · COUNTDOWN SLIPPING', '#ff6a5a');
         break;
       case 'extracted': {
         say('extractDone');
+        audio.setExtraction(false); audio.extractSuccess();
         const k = FIELD.spec.kind;
         const label = FIELD.spec.cargoLabel ?? '';
         const units = fe.carried.reduce((n, id) => n + (FIELD.items.get(id)?.units ?? 0), 0);
@@ -2990,7 +3028,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
    *  because blocking has to know which face the body is entering (see slideMove). */
   function clampAndSlide(ox: number, oz: number, x: number, z: number): { x: number; z: number } {
     // Swept slide against every wall + crate — solid, no tunnelling on a slow frame.
-    let [cx, cz] = slideMove(ox, oz, x, z, PLAYER_R, COLLIDERS);
+    // On a deck, low cover below your feet no longer blocks you.
+    const solid = floorY.current > 0.4 ? COLLIDERS.filter((c) => (c.h ?? 3) > floorY.current - 0.3) : COLLIDERS;
+    let [cx, cz] = slideMove(ox, oz, x, z, PLAYER_R, solid);
     if (endless) {
       // The endless chain runs toward -Z without end, so the authored arena box below
       // would pin the player at z = -17.6 and stall them in room 1. Bound them to the
@@ -3022,6 +3062,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     }
     // Being shoved off a body (or clamped) must not leave us inside a wall.
     ({ x: cx, z: cz } = ejectFromGeometry(cx, cz));
+    // Up on a catwalk or stair the railings keep you on it (you come down by the stair).
+    if (LEVEL) [cx, cz] = railedMove(LEVEL, floorY.current, ox, oz, cx, cz);
     return { x: cx, z: cz };
   }
 
@@ -3305,6 +3347,24 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         else if (e.ai !== 'hidden' && lvl < 1) lvl = 1;
       }
       audio.setMusicIntensity(lvl);
+      // A site raises the alarm the first time its guards open fire, and escalates when the fuse is
+      // down to its last seconds. Each fires once per run.
+      if (LEVEL && lvl >= 2 && !alertedRef.current) { alertedRef.current = true; audio.alarm(4, 1); say('firstContact'); }
+      // Your weapon's reserve is down to a magazine or less (a finite reserve: field operations)
+      if (Number.isFinite(sim.reserve) && sim.reserve + sim.ammo <= sim.gun.magazine && sim.playerAlive) sayAgain('lowAmmo', 90);
+      const fuse = FIELD.fuseLeft;
+      if (fuse > 0 && fuse <= 8 && !finalAlarmRef.current) { finalAlarmRef.current = true; audio.alarm(Math.max(3, Math.ceil(fuse)), 3); }
+      // Guards on the move within earshot are heard: a step each time one has covered ground.
+      const stepNow = performance.now();
+      for (const e of snap.enemies) {
+        if (!e.alive || !e.active || e.ai === 'hidden') continue;
+        const last = enemyStepRef.current.get(e.id);
+        if (!last) { enemyStepRef.current.set(e.id, { x: e.x, z: e.z, t: stepNow }); continue; }
+        if (stepNow - last.t < 320) continue;
+        const moved = Math.hypot(e.x - last.x, e.z - last.z);
+        enemyStepRef.current.set(e.id, { x: e.x, z: e.z, t: stepNow });
+        if (moved > 0.45) audio.enemyStep([e.x, 0, e.z]);
+      }
     }
     // health bar + damage vignette (red flash on hit, and a base tint when low)
     if (h.healthFill) {
@@ -3505,6 +3565,20 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   // ── Story presence: the fight is where the story arrives, never a menu ──
   /** Queue a trigger's lines. Fires at most once per operation. */
+  /** A trigger that may fire again: at most once per `cooldown` seconds of mission time, from real state.
+   *  `line` overrides the authored line (reinforcements carry their real count). */
+  function sayAgain(trigger: PresenceTrigger, cooldown: number, line?: PresenceLine) {
+    const last = lastSaid.current.get(trigger) ?? -Infinity;
+    if (sim.time - last < cooldown) return;
+    lastSaid.current.set(trigger, sim.time);
+    for (const l of line ? [line] : linesFor(trigger, mission.radio)) voQueue.current.push(l);
+  }
+
+  /** Guards really arrived: say so once per wave, with the number the sim spawned. */
+  function reinforced(spawned: number) {
+    if (spawned > 0) sayAgain('reinforcements', 25, reinforcementLine(spawned));
+  }
+
   function say(trigger: PresenceTrigger) {
     if (storyFired.current.has(trigger)) return;
     storyFired.current.add(trigger);
@@ -3549,6 +3623,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     reviveAt.current = 0;
     paintRefills();
     storyFired.current.clear();
+    lastSaid.current.clear();
     voQueue.current.length = 0;
     voUntil.current = 0;
     voCurrentId.current = null;
@@ -3656,7 +3731,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           off the FRONT of this list, which shifts every later index and would make
           React re-render every wall in the world on each room advance — a hitch per
           doorway. Keyed this way, the walls that didn't change keep their identity. */}
-      {LEVEL && <LevelArt level={LEVEL} minimal={minimal} lit={mission.zone !== 'DUSTLINE'} night={mission.conditions ? mission.conditions.phase === 'night' : undefined} calm={settingsRef?.current.access.reduceFlashes} />}
+      {LEVEL && <LevelArt level={LEVEL} cues={mission.cues} minimal={minimal} colourOnly={colourOnly} lit={mission.zone !== 'DUSTLINE'} night={mission.conditions ? mission.conditions.phase === 'night' : undefined} calm={settingsRef?.current.access.reduceFlashes} />}
       {!LEVEL && LEVEL_WALLS.map((c, i) => (
         <group key={`w${c.x}_${c.z}_${c.w}_${c.d}`}>
           {/* Every wall SHARES one unit cube and is scaled to size. Authoring a fresh
@@ -4135,8 +4210,9 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
   // Mobile is a first-class target: a left move-stick, a right
   // look-pad, and fire/ADS/reload buttons write into this, read by FpsWorld.
   const controls = useRef<Controls>({ moveX: 0, moveY: 0, lookX: 0, lookY: 0, lookSens: loadLookSens(), fire: false, ads: false, crouch: false, reload: false, fireMode: false, swap: false, interact: false, heal: false, toggle: null, lockCycle: false, tapAimX: null, tapAimY: null });
-  const audio = useMemo(() => new FpsAudio(), []);
-  useEffect(() => () => audio.dispose(), [audio]);
+  // The app's one audio engine (a click anywhere has already unlocked it); this screen takes a reference.
+  const audio = useMemo(() => acquireAudio(), []);
+  useEffect(() => () => { audio.setMusicState('silent'); audio.setExtraction(false); audio.setZone('NONE'); releaseAudio(); }, [audio]);
 
   // ── Mission campaign (slice 8): run CAMPAIGN[missionIndex]; complete → next ──
   // A `startMission` (from the external Operations list) wins over the resume slot.
@@ -4378,12 +4454,22 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
   useEffect(() => { controls.current.lookSens = settings.lookSens; }, [settings.lookSens]);
   // The player's mix, and silence while the tab is in the background (if chosen).
   useEffect(() => { audio.setMix(settings.audio); }, [audio, settings.audio]);
+  // The pause menu stops the audio clock; closing it carries on. (Held by reason, so a key press
+  // while paused cannot restart it.)
+  useEffect(() => { if (paused) audio.suspend('pause'); else audio.resume('pause'); return () => audio.resume('pause'); }, [audio, paused]);
   useEffect(() => {
     const apply = () => audio.setBackgroundMuted(settingsRef.current.muteInBackground && document.hidden);
     apply();
     document.addEventListener('visibilitychange', apply);
     return () => document.removeEventListener('visibilitychange', apply);
   }, [audio, settings.muteInBackground]);
+  // Leaving the tab pauses a fight: the sim must not run on while nobody is watching. Only when no
+  // menu or debrief is already up.
+  useEffect(() => {
+    const onHide = () => { if (document.hidden && !menuOpenRef.current) { setPaused(true); try { document.exitPointerLock?.(); } catch { /* ignore */ } } };
+    document.addEventListener('visibilitychange', onHide);
+    return () => document.removeEventListener('visibilitychange', onHide);
+  }, []);
   // Crosshair (Settings → Interface): style, colour, size and opacity. The frame loop
   // still moves the ticks for spread; this sets everything else.
   useEffect(() => {

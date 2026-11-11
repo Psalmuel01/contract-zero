@@ -95,11 +95,41 @@ export interface WorldView {
   zone: string;
   clock?: WorldClock;
   sites?: SiteStatus[];
+  /** Recent raids and operations, newest first; `status.state === 'active'` means a player is deployed. */
+  raids?: { id: number; player: string; started_at: number; plan: { target: string; kind: OpKind; resource: ResourceName; site: string }; status: { state: 'active' | 'extracted' | 'failed' } }[];
   actors: ActorView[];
   market: { insolvent: boolean; strategy: { margin_bp: number; spread_bp: number } };
   prices: PriceView[];
   board: BoardEntry[];
   flows: Record<string, { issued: number; destroyed: number; conserved: boolean }>;
+}
+
+/** The server's recorded before/after of an operation (consequence.rs). `after`, `next` and
+ *  `settled_tick` are null until it settles; a session from before recording has none. */
+export interface FactionSnapshot {
+  tick: number; id: string; name: string; holdings: Holdings; requirement: Record<ResourceName, number>
+  defense: number; credit_reserve: number; disrupted: { resource: ResourceName; until: number }[]
+}
+export interface NextPlan { available: boolean; reason: string | null; manifest: number; defense: number; guards: GuardPlan | null }
+export interface Consequence {
+  kind: OpKind; target: string; resource: ResourceName
+  before: FactionSnapshot; faced: NextPlan; after: FactionSnapshot | null; next: NextPlan | null; settled_tick: number | null
+}
+/** The target's own logged decisions after the operation settled (GET /missions/{id}/aftermath). */
+export interface Aftermath {
+  recorded: boolean; settled?: boolean; target?: string; settled_tick?: number
+  decisions: { seq: number; tick: number; payload: AgentEvent['payload'] }[]
+}
+
+/** One completed operation in the War Room's record (GET /warroom/operations). */
+export interface OperationRecord {
+  player: string; completed_at: string
+  outcome: MissionResult['outcome']; reason: string | null; kind: OpKind; resource: ResourceName; target: string
+  extracted_units: number; bounty: number
+  consequence: Consequence
+  decisions: Aftermath['decisions']
+  /** The payout's NEAR settlement as recorded; only `settled_on_chain` means confirmed. */
+  settlement: { op_id: string; kind: string; status: string; settled_on_chain: boolean; tx_hashes: string[]; explorer: string[]; error: string | null } | null
 }
 
 export interface MissionStart { session: string; raid: number; min_secs: number; mission: ConvoyContract; story?: MissionStory }
@@ -125,6 +155,8 @@ export interface MissionResult {
   /** The cast's account of what happened, written from the result. */
   debrief?: StoryLine[];
   codename?: string | null;
+  /** Recorded before/after; null for sessions started before recording. */
+  consequence?: Consequence | null;
 }
 
 export interface SettlementView {
@@ -246,7 +278,7 @@ export interface WarActor {
   grudges: { player: string; raids: number; sabotage: number; recoveries: number; units_lost: number; last_tick: number }[]
   rivals: { sponsor: string; sponsor_name: string; bounties_paid: number; last_tick: number | null }[]
 }
-export interface WarConvoy { id: number; owner: string; owner_name: string; resource: ResourceName; units: number; defense: number; dispatched_at: number; arrives_at: number; progress: number; status: { state: string; by?: string } }
+export interface WarConvoy { id: number; owner: string; owner_name: string; resource: ResourceName; units: number; defense: number; dispatched_at: number; arrives_at: number; progress: number; status: import('@/lib/world/convoy').ConvoyStatus }
 export interface WarContract { id: number; kind: OpKind; sponsor: string; sponsor_name: string; target: string; target_name: string; resource: ResourceName; amount: number; expires_at: number }
 export interface WarPrice { resource: ResourceName; ask: number; bid: number; mid: number; stock: number; target: number }
 export interface WarRoomView {
@@ -345,6 +377,8 @@ export const api = {
   intentsQuote: (b: { origin_asset: string; destination_asset: string; amount: string }) => req<IntentsQuote>('/intents/quote', { method: 'POST', body: JSON.stringify(b) }),
   savePreferences: (version: number, prefs: Record<string, unknown>) => req<StoredPreferences>('/me/preferences', { method: 'PUT', body: JSON.stringify({ version, prefs }) }),
   missionStory: (session: string) => req<{ story: MissionStory }>(`/missions/${session}/story`).then((r) => r.story),
+  warOperations: (limit = 10) => req<{ operations: OperationRecord[] }>(`/warroom/operations?limit=${limit}`).then((r) => r.operations),
+  aftermath: (session: string) => req<Aftermath>(`/missions/${session}/aftermath`),
   settlement: (opId: string) => req<SettlementView>(`/settlements/${encodeURIComponent(opId)}`),
   completeMission: (session: string, outcome: 'extracted' | 'killed', kills: number, record?: FieldRecord) =>
     req<{ replayed: boolean; result: MissionResult }>(`/missions/${session}/complete`, { method: 'POST', body: JSON.stringify({ outcome, kills, record }) }),
