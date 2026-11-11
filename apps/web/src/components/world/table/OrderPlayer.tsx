@@ -86,9 +86,9 @@ export function OrderCard({ story, onStep, onStop }: { story: Story; onStep: (d:
           <div className="mt-2 flex items-center gap-2">
             <div className="flex gap-1" aria-hidden>{s.beats.map((x, i) => <span key={x.key} className={`h-1.5 w-4 ${i <= story.beat ? 'bg-amber' : 'bg-line'}`} />)}</div>
             <div className="ml-auto flex gap-1">
-              <button type="button" className="border border-line px-2 py-0.5 text-xs text-muted hover:text-fog disabled:opacity-40" onClick={() => onStep(-1)} disabled={story.beat === 0} aria-label="Previous stage">‹</button>
-              <button type="button" className="border border-line px-2 py-0.5 text-xs text-muted hover:text-fog disabled:opacity-40" onClick={() => onStep(1)} disabled={story.beat >= s.beats.length - 1} aria-label="Next stage">›</button>
-              <button type="button" className="border border-line px-2 py-0.5 text-xs text-muted hover:text-fog" onClick={onStop} data-testid="order-card-close">Close</button>
+              <button type="button" className="min-h-6 min-w-6 border border-line px-2 py-0.5 text-xs text-muted hover:text-fog disabled:opacity-40" onClick={() => onStep(-1)} disabled={story.beat === 0} aria-label="Previous stage">‹</button>
+              <button type="button" className="min-h-6 min-w-6 border border-line px-2 py-0.5 text-xs text-muted hover:text-fog disabled:opacity-40" onClick={() => onStep(1)} disabled={story.beat >= s.beats.length - 1} aria-label="Next stage">›</button>
+              <button type="button" className="min-h-6 min-w-6 border border-line px-2 py-0.5 text-xs text-muted hover:text-fog" onClick={onStop} data-testid="order-card-close">Close</button>
             </div>
           </div>
         </div>
@@ -110,7 +110,7 @@ export function OrderStrip({ scenes, playing, onPlay }: { scenes: ProcurementSce
             <li key={s.order} className="flex items-center gap-2 border-b border-line/60 py-1 text-xs">
               <span className="min-w-0 flex-1 truncate"><span className="text-fog">{s.requesterName}</span> <span className="text-muted">· {s.resource} · {s.contested ? `${s.offered.length} offers` : s.offered.length === 1 ? 'one offer' : 'no offers'} · {last.title.toLowerCase()}</span></span>
               <button type="button" onClick={() => onPlay(s.order)} aria-pressed={playing === s.order} data-testid={`play-order-${s.order}`}
-                className={`shrink-0 border px-2 py-0.5 font-display text-[11px] font-semibold uppercase tracking-widest ${playing === s.order ? 'border-amber text-amber-hi' : 'border-line text-muted hover:text-fog'}`}>{playing === s.order ? 'Playing' : 'Play'}</button>
+                className={`min-h-6 shrink-0 border px-2 py-0.5 font-display text-[11px] font-semibold uppercase tracking-widest ${playing === s.order ? 'border-amber text-amber-hi' : 'border-line text-muted hover:text-fog'}`}>{playing === s.order ? 'Playing' : 'Play'}</button>
             </li>
           )
         })}

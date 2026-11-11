@@ -89,7 +89,7 @@ export function WarTableSection({ war, market }: { war: WarRoomView; market: Mar
           <div className="ml-auto flex border border-line text-[11px]" role="group" aria-label="Map view">
             {(['relief', 'flat'] as const).map((v) => (
               <button key={v} type="button" aria-pressed={view === v} onClick={() => choose(v)} data-testid={`wt-view-${v}`}
-                className={`px-2.5 py-1 font-display font-semibold uppercase tracking-widest ${view === v ? 'bg-amber/15 text-amber-hi' : 'text-muted hover:text-fog'}`}>{v === 'relief' ? 'Relief' : 'Flat map'}</button>
+                className={`min-h-6 px-2.5 py-1 font-display font-semibold uppercase tracking-widest ${view === v ? 'bg-amber/15 text-amber-hi' : 'text-muted hover:text-fog'}`}>{v === 'relief' ? 'Relief' : 'Flat map'}</button>
             ))}
           </div>
         </div>

@@ -12,6 +12,7 @@ import { ReadinessSummary, useReadinessData } from '@/components/world/Readiness
 import { FactionInsignia } from '@/components/ui/FactionInsignia'
 import { factionColor } from '@/lib/factions'
 import { boardView, guardCount, kindsPresent, SORT_LABEL, type KindFilter, type SortKey } from '@/lib/world/board'
+import { BoardTable } from '@/components/world/table/BoardTable'
 
 const PHASE_WORD = { day: 'by day', dusk: 'at dusk', night: 'at night' } as const
 
@@ -52,8 +53,11 @@ export default function ContractBoard() {
   const world = useQuery({ queryKey: ['world'], queryFn: api.world, refetchInterval: 5_000 })
   const [kind, setKind] = useState<KindFilter>('all')
   const [sort, setSort] = useState<SortKey>('pay')
+  const [site, setSite] = useState<string | null>(null)
+  const [looking, setLooking] = useState<string | null>(null)
   const all = world.data?.board ?? []
-  const board = boardView(all, kind, sort)
+  const board = boardView(all, kind, sort).filter((e) => !site || e.site?.id === site)
+  const siteName = site ? all.find((e) => e.site?.id === site)?.site?.name ?? site : null
   const readiness = useReadinessData()
 
   return (
@@ -78,7 +82,20 @@ export default function ContractBoard() {
         <Panel><p className="text-muted">Nothing on the board right now. Vanguard may be out of fuel to stage a depot, and nobody is paying for anything else.</p></Panel>
       )}
       {all.length > 0 && board.length === 0 && <Panel><p className="text-muted">No {kind} contracts are open right now. <button className="text-steel underline" onClick={() => setKind('all')}>Show all</button></p></Panel>}
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,1fr)]">
+      <div className="lg:sticky lg:top-4" data-testid="board-table">
+        <div className="cz-panel p-2">
+          <BoardTable world={world.data} board={all} focusSite={looking} picked={site} onPick={setSite} />
+          <p className="px-1 pt-2 text-xs text-dim">The operations map: each pin is a site with contracts on offer. Pick a site to see only its contracts; point at a contract to find its site.</p>
+        </div>
+      </div>
       <div className="grid gap-3">
+        {site && (
+          <div className="flex items-center gap-2 text-sm" data-testid="board-site-filter">
+            <span className="text-muted">Showing contracts at <b className="text-fog">{siteName}</b></span>
+            <button type="button" onClick={() => setSite(null)} className="min-h-6 border border-line px-2 text-xs text-muted hover:text-fog">All sites</button>
+          </div>
+        )}
         {board.map((e) => {
           const k = KIND[e.kind] ?? KIND.raid
           const phase = world.data?.clock?.conditions.phase
@@ -88,7 +105,8 @@ export default function ContractBoard() {
           const fee = e.bounty?.amount ?? 0
           const g = describeGuardPlan(e.guards, e.target_name)
           return (
-            <section key={`${e.kind}-${e.target}-${e.resource}-${e.site?.id ?? ''}`} className="cz-panel p-4 sm:p-5" data-testid="contract-card" data-kind={e.kind}>
+            <section key={`${e.kind}-${e.target}-${e.resource}-${e.site?.id ?? ''}`} className={`cz-panel p-4 sm:p-5 ${looking && looking === e.site?.id ? 'ring-1 ring-amber/50' : ''}`} data-testid="contract-card" data-kind={e.kind}
+              onMouseEnter={() => setLooking(e.site?.id ?? null)} onMouseLeave={() => setLooking(null)} onFocus={() => setLooking(e.site?.id ?? null)}>
               <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-center">
                 <div className="flex min-w-0 gap-3">
                   <span style={{ color: factionColor(e.target) }} className="hidden shrink-0 sm:block"><FactionInsignia id={e.target} className="h-12 w-12" title={e.target_name} /></span>
@@ -122,6 +140,7 @@ export default function ContractBoard() {
             </section>
           )
         })}
+      </div>
       </div>
 
       {world.data && (

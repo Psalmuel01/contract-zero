@@ -569,3 +569,14 @@ body {
   summary, button, [role='tab'], a { min-height: 24px; }
   summary { padding-block: 3px; }
 }
+
+/* ── Screen changes (app/template.tsx). Opacity only; the tokens make Reduce motion zero it. ── */
+.cz-route { animation: cz-route-in var(--dur-slow) var(--ease-standard) both; }
+@keyframes cz-route-in { from { opacity: 0; } to { opacity: 1; } }
+.cz-route-sweep {
+  position: fixed; left: 0; right: 0; top: 0; height: 2px; z-index: 300; pointer-events: none; opacity: 0;
+  background: linear-gradient(90deg, transparent, rgb(240 160 60 / 0.75) 20%, rgb(255 205 140 / 0.9) 50%, rgb(240 160 60 / 0.75) 80%, transparent);
+  box-shadow: 0 0 18px 2px rgb(240 160 60 / 0.35);
+  animation: cz-route-sweep calc(var(--dur-slow) * 1.4) var(--ease-standard) both;
+}
+@keyframes cz-route-sweep { from { transform: translateY(0); opacity: 0.9; } to { transform: translateY(100vh); opacity: 0; } }
