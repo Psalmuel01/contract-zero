@@ -94,6 +94,22 @@ pub async fn start(state: web::Data<AppState>, req: HttpRequest, body: web::Json
             if let Some(gun) = body.gun.as_deref() {
                 check_gun(w, &body.player, gun)?;
             }
+            // A browser back/reload must not strand a reserved, unplayed contract.
+            // Never reset a run that has armed or submitted combat events.
+            if let Some(active) = w.active_raid_of(&body.player) {
+                let raid = active.id;
+                let plan = active.plan.clone();
+                if plan.target == body.target && plan.resource == body.resource && plan.kind == body.kind {
+                    let saved: Option<(Uuid, f64, Option<Value>, Option<Value>, i32)> = sqlx::query_as(
+                        "SELECT id, min_secs, story, field, protocol FROM mission_sessions s WHERE player = $1 AND raid_id = $2 AND completed_at IS NULL AND expires_at > now() AND gun IS NULL AND NOT EXISTS (SELECT 1 FROM mission_events e WHERE e.session = s.id) ORDER BY started_at DESC LIMIT 1"
+                    ).bind(&body.player).bind(raid as i64).fetch_optional(&mut *db).await?;
+                    if let Some((session, min_secs, stored, field, protocol)) = saved {
+                        let mut mission = crate::handlers::world::mission_json(w, &plan, Some(raid));
+                        mission["field"] = field.unwrap_or(Value::Null);
+                        return Ok(json!({ "session": session, "raid": raid, "min_secs": min_secs, "mission": mission, "story": stored.map(|v| v["story"].clone()), "protocol": protocol, "resumed": true }));
+                    }
+                }
+            }
             let action = match body.kind {
                 cz_economy::OpKind::Raid => Action::StartRaid { target: body.target.clone(), resource: body.resource },
                 kind => Action::StartOperation { kind, target: body.target.clone(), resource: body.resource },
@@ -143,6 +159,26 @@ pub async fn start(state: web::Data<AppState>, req: HttpRequest, body: web::Json
             Ok(json!({ "session": session, "raid": raid, "min_secs": min_secs, "mission": mission, "story": tale, "protocol": 2 }))
         })
         .await;
+    respond(res)
+}
+
+/// Explicit recovery when an operator leaves a deployment and wants to start over.
+/// No extraction, reward, or settlement is produced by abandonment.
+pub async fn abandon_active(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    let who = match crate::handlers::auth::player(&state, &req).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let res = state.world.transact(async move |w, db| {
+        let Some(raid) = w.active_raid_of(&who.account).map(|r| r.id) else {
+            return Ok(json!({ "abandoned": false }));
+        };
+        let events = w.execute(&Caller::System, &Action::FailRaid { raid, player: who.account.clone() })?;
+        sqlx::query("UPDATE mission_sessions SET completed_at = now(), outcome = 'expired' WHERE player = $1 AND raid_id = $2 AND completed_at IS NULL")
+            .bind(&who.account).bind(raid as i64).execute(&mut *db).await?;
+        log_event(&mut *db, w.tick, &format!("player:{}", who.account), "mission", &json!({ "phase": "abandoned", "raid": raid, "events": summarize(&events) })).await?;
+        Ok(json!({ "abandoned": true }))
+    }).await;
     respond(res)
 }
 
@@ -440,6 +476,12 @@ pub async fn story(state: web::Data<AppState>, req: HttpRequest, path: web::Path
     if stored["voiced"] != true {
         if let Some(planner) = crate::services::planner::Planner::from_env() {
             let call = story::rewrite(&planner, &mut tale, &facts).await;
+            if call["ok"] == true {
+                tracing::info!(%session, accepted = %call["accepted"], "story: AI dialogue accepted");
+            } else {
+                tracing::warn!(%session, error = %call["error"], "story: authored fallback");
+            }
+            tale.generation = Some(call.clone());
             let tick = state.world.read(|w| w.tick).await;
             let _ = log_event(db, tick, &format!("player:{player}"), "story_call", &json!({ "session": session, "model": planner.model, "call": call, "rewrites": tale.rewrites })).await;
             let _ = sqlx::query("UPDATE mission_sessions SET story = $2 WHERE id = $1")
@@ -459,14 +501,14 @@ pub async fn aftermath(state: web::Data<AppState>, req: HttpRequest, path: web::
     };
     let session = path.into_inner();
     let db = state.world.db();
-    let row: Option<(String, Option<Value>, Option<DateTime<Utc>>)> = match sqlx::query_as("SELECT player, consequence, completed_at FROM mission_sessions WHERE id = $1").bind(session).fetch_optional(db).await {
+    let row: Option<(String, Option<Value>, Option<DateTime<Utc>>, i64)> = match sqlx::query_as("SELECT player, consequence, completed_at, raid_id FROM mission_sessions WHERE id = $1").bind(session).fetch_optional(db).await {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("aftermath lookup failed: {e}");
             return HttpResponse::InternalServerError().json(json!({ "error": "storage error" }));
         }
     };
-    let Some((player, c, completed)) = row else { return HttpResponse::NotFound().json(json!({ "error": "unknown session" })) };
+    let Some((player, c, completed, raid_id)) = row else { return HttpResponse::NotFound().json(json!({ "error": "unknown session" })) };
     if player != who.account {
         return HttpResponse::Forbidden().json(json!({ "error": "session belongs to another player" }));
     }
@@ -478,17 +520,30 @@ pub async fn aftermath(state: web::Data<AppState>, req: HttpRequest, path: web::
     };
     let rows: Result<Vec<(i64, i64, Value)>, sqlx::Error> = sqlx::query_as(
         "SELECT seq, tick, payload FROM world_events
-         WHERE kind = 'agent_decision' AND source = $1 AND tick > $2
+         WHERE kind = 'agent_decision' AND source = $1 AND tick >= $2 AND created_at >= $3
          ORDER BY seq ASC LIMIT 12",
     )
     .bind(&c.target)
     .bind(settled as i64)
+    .bind(completed)
     .fetch_all(db)
     .await;
     match rows {
         Ok(rows) => {
             let decisions: Vec<Value> = rows.into_iter().map(|(seq, tick, p)| json!({ "seq": seq, "tick": tick, "payload": p })).collect();
-            HttpResponse::Ok().json(json!({ "recorded": true, "settled": true, "target": c.target, "settled_tick": settled, "decisions": decisions }))
+            // Explicit event identity establishes the connection; timestamps alone
+            // cannot prove that a review considered this operation.
+            let reviews: Result<Vec<(i64, i64, Value)>, sqlx::Error> = sqlx::query_as(
+                "SELECT seq, tick, payload FROM world_events WHERE kind = 'planner_call' AND source = $1 AND payload->'context' @> $2::jsonb ORDER BY seq ASC LIMIT 4"
+            ).bind(&c.target).bind(json!([{ "trigger": "mission_completed", "raid": raid_id }])).fetch_all(db).await;
+            let reviews = match reviews {
+                Ok(rows) => rows.into_iter().map(|(seq, tick, payload)| json!({ "seq": seq, "tick": tick, "payload": payload })).collect::<Vec<_>>(),
+                Err(e) => {
+                    tracing::error!("aftermath AI review lookup failed: {e}");
+                    return HttpResponse::InternalServerError().json(json!({ "error": "storage error" }));
+                }
+            };
+            HttpResponse::Ok().json(json!({ "recorded": true, "settled": true, "target": c.target, "settled_tick": settled, "decisions": decisions, "ai_reviews": reviews, "ai_configured": crate::services::planner::Planner::from_env().is_some() }))
         }
         Err(e) => {
             tracing::error!("aftermath events failed: {e}");

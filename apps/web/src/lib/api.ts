@@ -116,7 +116,16 @@ export interface Consequence {
   before: FactionSnapshot; faced: NextPlan; after: FactionSnapshot | null; next: NextPlan | null; settled_tick: number | null
 }
 /** The target's own logged decisions after the operation settled (GET /missions/{id}/aftermath). */
+export interface AIReview {
+  seq: number; tick: number
+  payload: {
+    ok: boolean; model: string; error?: string
+    outcome?: { assessment?: string; error?: string; results?: { type: string; validation: string; error?: string | null; rationale?: string }[] }
+  }
+}
 export interface Aftermath {
+  ai_configured?: boolean
+  ai_reviews?: AIReview[]
   recorded: boolean; settled?: boolean; target?: string; settled_tick?: number
   decisions: { seq: number; tick: number; payload: AgentEvent['payload'] }[]
 }
@@ -376,6 +385,7 @@ export const api = {
   intents: () => req<IntentsOverview>('/intents'),
   intentsQuote: (b: { origin_asset: string; destination_asset: string; amount: string }) => req<IntentsQuote>('/intents/quote', { method: 'POST', body: JSON.stringify(b) }),
   savePreferences: (version: number, prefs: Record<string, unknown>) => req<StoredPreferences>('/me/preferences', { method: 'PUT', body: JSON.stringify({ version, prefs }) }),
+  abandonActiveMission: () => req<{ abandoned: boolean }>('/missions/active/abandon', { method: 'POST' }),
   missionStory: (session: string) => req<{ story: MissionStory }>(`/missions/${session}/story`).then((r) => r.story),
   warOperations: (limit = 10) => req<{ operations: OperationRecord[] }>(`/warroom/operations?limit=${limit}`).then((r) => r.operations),
   aftermath: (session: string) => req<Aftermath>(`/missions/${session}/aftermath`),

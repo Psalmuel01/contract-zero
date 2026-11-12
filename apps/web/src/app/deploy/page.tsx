@@ -76,11 +76,11 @@ function Deploy() {
       const start = await api.startMission(target, resource, kind)
       setPhase({ kind: 'briefing', start, before, story: null })
       // The voiced story when the server has a model (checked line by line), else
-      // the authored one it started with. Never wait more than 12 s for it.
+      // the authored one it started with. Never wait more than 32 s for it; the briefing remains usable.
       const authored = start.story ?? null
       const voiced = await Promise.race([
         api.missionStory(start.session).catch(() => authored),
-        new Promise<MissionStory | null>((r) => setTimeout(() => r(authored), 12_000)),
+        new Promise<MissionStory | null>((r) => setTimeout(() => r(authored), 32_000)),
       ])
       setPhase((p) => (p.kind === 'briefing' && p.start.session === start.session ? { ...p, story: voiced ?? authored } : p))
     } catch (e) {
@@ -197,6 +197,14 @@ function Deploy() {
     return (
       <Shell title="Deploy" back={{ href: '/contracts', label: 'Contract Board' }}>
         <Panel><p className="text-rose-400">Could not deploy: {phase.message}</p></Panel>
+        {phase.message.includes('active raid') && <div className="mt-4">
+          <p className="mb-3 text-sm text-muted">You already accepted an operation. Returning to its original contract can resume an unplayed briefing. To start over, abandon it below; any progress in that operation is lost and nothing is paid.</p>
+          <button type="button" className="cz-btn cz-btn-primary px-5 py-2 text-sm" onClick={async () => {
+            setPhase({ kind: 'starting' })
+            try { await api.abandonActiveMission(); setPhase({ kind: 'intel' }) }
+            catch (e) { setPhase({ kind: 'error', message: `Could not abandon active raid: ${(e as Error).message}` }) }
+          }}>Abandon active operation</button>
+        </div>}
         <Link href="/contracts" className="cz-btn cz-btn-ghost mt-4 inline-block px-5 py-2 text-sm">Back to the board</Link>
       </Shell>
     )

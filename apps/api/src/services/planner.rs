@@ -52,12 +52,16 @@ impl Planner {
     }
 
     async fn complete(&self, system: &str, user: &str) -> Result<(String, Value), String> {
-        self.complete_json("plan", schema(), system, user, 900, self.timeout).await
+        let max_tokens = std::env::var("PLANNER_MAX_TOKENS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(4096).clamp(1024, 16384);
+        self.complete_json("plan", schema(), system, user, max_tokens, self.timeout).await
     }
 
     /// One chat completion constrained to a JSON schema. Returns the raw content and
     /// the usage block; the caller parses and validates.
     pub async fn complete_json(&self, name: &str, schema: Value, system: &str, user: &str, max_tokens: u32, timeout: Duration) -> Result<(String, Value), String> {
+        // Some compatible providers do not enforce response_format. State the
+        // contract in the prompt as well; typed parsing remains authoritative.
+        let system = format!("{system}\nReturn a JSON object matching this JSON Schema exactly. String fields must be plain strings, not objects. Include every required field. Keep the answer concise.\n{schema}");
         let body = json!({
             "model": self.model,
             "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
@@ -70,6 +74,9 @@ impl Planner {
         let v: Value = r.json().await.map_err(|e| format!("response: {e}"))?;
         if !status.is_success() {
             return Err(format!("HTTP {status}: {}", v.to_string().chars().take(300).collect::<String>()));
+        }
+        if v["choices"][0]["finish_reason"] == "length" {
+            return Err(format!("output token limit reached ({max_tokens}); increase PLANNER_MAX_TOKENS for strategic plans"));
         }
         let content = v["choices"][0]["message"]["content"].as_str().ok_or_else(|| format!("no content: {}", v.to_string().chars().take(300).collect::<String>()))?.to_string();
         Ok((content, v["usage"].clone()))
@@ -304,11 +311,18 @@ pub fn validate(w: &World, actor: &str, p: &Proposed) -> Result<Option<Action>, 
 
 /// One strategic round: each agent in turn (observe, propose, validate, execute, log).
 /// The world lock is never held across a model call.
+static ROUND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn run(state: &AppState, planner: &Planner) {
+    run_triggered(state, planner, "manual strategic review", &[]).await;
+}
+
+async fn run_triggered(state: &AppState, planner: &Planner, trigger: &str, context: &[Value]) {
+    let _round = ROUND_LOCK.lock().await;
     let agents: Vec<String> = state.world.read(|w| w.actors.keys().cloned().collect()).await;
     for actor in agents {
         let (obs, system, tick) = state.world.read(|w| (observation(w, &actor), format!("{}\n{RULES}", character(w, &actor)), w.tick)).await;
-        let user = format!("Observation (JSON):\n{obs}");
+        let user = format!("Review trigger: {trigger}\nRecent committed events (JSON): {}\nObservation (JSON):\n{obs}", json!(context));
         let digest = hex::encode(Sha256::digest(user.as_bytes()));
         let started = Instant::now();
         let out = planner.complete(&system, &user).await;
@@ -325,13 +339,15 @@ pub async fn run(state: &AppState, planner: &Planner) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("planner: {actor}: {e}; deterministic policy continues");
-                let _ = log_event(&db, tick, &actor, "planner_call", &json!({ "model": planner.model, "ok": false, "error": e, "latency_ms": latency_ms, "observation_sha256": digest, "raw": raw.chars().take(2000).collect::<String>(), "fallback": "deterministic policy continues" })).await;
+                let _ = log_event(&db, tick, &actor, "planner_call", &json!({ "model": planner.model, "trigger": trigger, "context": context, "ok": false, "error": e, "latency_ms": latency_ms, "observation_sha256": digest, "raw": raw.chars().take(2000).collect::<String>(), "fallback": "deterministic policy continues" })).await;
                 continue;
             }
         };
         let near = state.near.clone();
         let model = planner.model.clone();
         let actor_c = actor.clone();
+        let decision_trigger = trigger.to_string();
+        let decision_context = context.to_vec();
         let summary = state
             .world
             .transact(async move |w, db| {
@@ -359,11 +375,11 @@ pub async fn run(state: &AppState, planner: &Planner) {
                         },
                     };
                     let payload = json!({
-                        "planner": format!("llm:{model}"), "trigger": "strategic review", "context": [], "proposed": { "type": p.kind, "resource": p.resource, "side": p.side, "qty": p.qty, "target": p.target, "amount": p.amount, "level": p.level, "convoy": p.convoy, "margin_bp": p.margin_bp },
+                        "planner": format!("llm:{model}"), "trigger": decision_trigger, "context": [], "event_context": decision_context, "proposed": { "type": p.kind, "resource": p.resource, "side": p.side, "qty": p.qty, "target": p.target, "amount": p.amount, "level": p.level, "convoy": p.convoy, "margin_bp": p.margin_bp },
                         "action": action, "rationale": p.rationale, "validation": validation, "error": error, "events": events,
                     });
                     log_event(&mut *db, w.tick, &actor_c, "agent_decision", &payload).await?;
-                    results.push(json!({ "type": p.kind, "validation": validation, "error": payload["error"] }));
+                    results.push(json!({ "type": p.kind, "validation": validation, "error": payload["error"], "rationale": p.rationale, "action": payload["action"], "events": payload["events"] }));
                 }
                 if !proposal.broadcast.trim().is_empty() {
                     log_event(&mut *db, w.tick, &actor_c, "faction_broadcast", &json!({ "text": proposal.broadcast.chars().take(200).collect::<String>(), "model": model })).await?;
@@ -372,8 +388,12 @@ pub async fn run(state: &AppState, planner: &Planner) {
             })
             .await;
         let summary = summary.unwrap_or_else(|e| json!({ "error": e.to_string() }));
-        let _ = log_event(&db, tick, &actor, "planner_call", &json!({ "model": planner.model, "ok": true, "latency_ms": latency_ms, "usage": usage, "observation_sha256": digest, "raw": raw.chars().take(2000).collect::<String>(), "outcome": summary })).await;
+        let _ = log_event(&db, tick, &actor, "planner_call", &json!({ "model": planner.model, "trigger": trigger, "context": context, "ok": true, "latency_ms": latency_ms, "usage": usage, "observation_sha256": digest, "raw": raw.chars().take(2000).collect::<String>(), "outcome": summary })).await;
     }
+}
+
+fn review_due(now: tokio::time::Instant, next_allowed: tokio::time::Instant, next_periodic: tokio::time::Instant, has_events: bool) -> bool {
+    now >= next_allowed && (has_events || now >= next_periodic)
 }
 
 pub fn spawn(state: AppState) {
@@ -384,13 +404,41 @@ pub fn spawn(state: AppState) {
     let tick_secs = std::env::var("WORLD_TICK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60u64).max(1);
     let period = Duration::from_secs(tick_secs * planner.every_ticks);
     tracing::info!("planner: {} every {} tick(s) ({period:?})", planner.model, planner.every_ticks);
+    let mut events = state.world.strategic_events();
+    let cooldown = Duration::from_secs(std::env::var("PLANNER_COOLDOWN_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(120).max(1));
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(period);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
+        let mut pulse = tokio::time::interval(Duration::from_secs(2));
+        pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut next_periodic = tokio::time::Instant::now() + period;
+        let mut next_allowed = tokio::time::Instant::now();
+        let mut pending = Vec::new();
         loop {
-            interval.tick().await;
-            run(&state, &planner).await;
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(event) => {
+                        if pending.len() == 32 { pending.remove(0); }
+                        pending.push(event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("planner: missed {n} notifications; requesting world review");
+                        if pending.len() == 32 { pending.remove(0); }
+                        pending.push(json!({ "trigger": "event_backlog", "missed": n }));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                _ = pulse.tick() => {
+                    let now = tokio::time::Instant::now();
+                    if review_due(now, next_allowed, next_periodic, !pending.is_empty()) {
+                        let context = std::mem::take(&mut pending);
+                        let trigger = if context.is_empty() { "periodic strategic review" } else { "response to committed world events" };
+                        tracing::info!("planner: {trigger} ({} event(s))", context.len());
+                        run_triggered(&state, &planner, trigger, &context).await;
+                        let finished = tokio::time::Instant::now();
+                        next_allowed = finished + cooldown;
+                        next_periodic = finished + period;
+                    }
+                }
+            }
         }
     });
 }
@@ -398,6 +446,17 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn events_bypass_periodic_wait_but_respect_cooldown() {
+        let now = tokio::time::Instant::now();
+        let later = now + Duration::from_secs(120);
+        assert!(review_due(now, now, later, true));
+        assert!(!review_due(now, later, later, true));
+        assert!(!review_due(now, now, later, false));
+        assert!(review_due(later, later, later, false));
+        assert!(!review_due(now, later, now, false));
+    }
 
     fn prop(v: Value) -> Proposed {
         serde_json::from_value(v).unwrap()
