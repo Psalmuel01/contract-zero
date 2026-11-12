@@ -116,6 +116,10 @@ Deliberately **not** claimed: that fuel idles factory machinery, that low credit
 
 Cast, names, call signs and voice direction are recorded in [PERSONAS.md](PERSONAS.md) and defined in `apps/web/src/lib/personas.ts` (a test keeps the data and the doc in step). Rule: the economy decides, a persona only explains; names are interface attribution and are never put into generated radio text. Shown on the War Table's Commander block (checked live for all four powers). Portraits are not drawn, and Halcyon's radio voice is not wired.
 
+## Pass 2 (2026-11-12)
+
+The experiential pass on top of this document's foundations: the War Table relief, less dashboard on the Hub, Contracts and Exchange, site identity, a measured audio pass, supply orders played as events, and a recording with audio. See [living-world-2/README.md](living-world-2/README.md) and [audio-pass/README.md](audio-pass/README.md).
+
 ## 3. Delivery status
 
 | Phase | Status |
