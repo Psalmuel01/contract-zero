@@ -32,7 +32,8 @@ export function RadioFeed() {
       if (!audio?.isUnlocked()) return
       const e = strategicQueue.next(Date.now())
       if (!e) return
-      audio.vo(`dyn-strategic-${e.key}`, e.speaker)
+      // the transmission lasts about as long as the line takes to say
+      audio.vo(`dyn-strategic-${e.key}`, e.speaker, 0.9 + e.text.split(/\s+/).length * 0.3)
       setLine(e)
       if (hide) clearTimeout(hide)
       hide = setTimeout(() => setLine((cur) => (cur?.key === e.key ? null : cur)), 4500 + e.text.length * 55)

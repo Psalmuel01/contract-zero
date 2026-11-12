@@ -24,7 +24,8 @@ export const STATE_TARGETS: Record<MusicState, Targets> = {
   combat: { drone: 0.16, pulse: 0.5, motif: 0.42, riser: 0 },
   boss: { drone: 0.18, pulse: 0.6, motif: 0.5, riser: 0 },
   // the countdown: everything, and a riser climbing under it
-  extraction: { drone: 0.16, pulse: 0.6, motif: 0.46, riser: 0.35 },
+  // (the riser was measured too quiet to build tension at 0.35: the countdown barely rose over the site)
+  extraction: { drone: 0.16, pulse: 0.6, motif: 0.46, riser: 0.7 },
   // after: the pulse drops out, the theme stays softly, and a resolution is sounded on entering
   results: { drone: 0.12, pulse: 0, motif: 0.3, riser: 0 },
   // the war table and the exchange: a slow, watchful pulse and a sparse theme

@@ -153,7 +153,7 @@ export class MusicLayers {
       osc.frequency.value = freq;
       osc.detune.value = detune;
       const g = this.ctx.createGain();
-      g.gain.value = 0.3;
+      g.gain.value = 0.6;
       osc.connect(g).connect(filter);
       osc.start();
       this.droneNodes.push(osc);
@@ -167,7 +167,7 @@ export class MusicLayers {
     const t = this.ctx.currentTime;
     f.frequency.cancelScheduledValues(t);
     f.frequency.setValueAtTime(200, t);
-    f.frequency.exponentialRampToValueAtTime(2200, t + 9);
+    f.frequency.exponentialRampToValueAtTime(3200, t + 9);
   }
 
   private resetRiser() {

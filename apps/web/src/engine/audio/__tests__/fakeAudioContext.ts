@@ -62,6 +62,7 @@ export class FakeAudioContext {
   createDelay() { return this.make('delay') }
   createAnalyser() { return this.make('analyser') }
   createConvolver() { return this.make('convolver') }
+  createWaveShaper() { return this.make('shaper') }
   createScriptProcessor() { return this.make('processor') }
   createBuffer(_c: number, n: number) { return { getChannelData: () => new Float32Array(n), length: n } }
   decodeAudioData() { return Promise.reject(new Error('no decode in tests')) }
