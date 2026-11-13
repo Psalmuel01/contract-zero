@@ -20,6 +20,15 @@ Every file the web app ships under `public/`, where it came from, and its licenc
 - `public/models/production/modular-kit.glb`: original reusable container, jersey-barrier, equipment-case, logistics-truck and pump-skid modules, **MIT**, same authoring source. No external model inputs or textures. Dimensions use a unit envelope mapped to the existing colliders.
 - `public/models/production/inventory.json`: generated sizes, triangle counts and provenance. Rerun the script to regenerate all three files. GLBs use standard glTF 2.0 metallic/roughness materials. They have no texture payload; this pass reuses the existing JPEG PBR maps. KTX2/Basis conversion is not implemented.
 
+## Imported models
+
+- **Licensed or CC0 models** come in only through `scripts/import-asset.mjs`.
+  - It refuses a model without a recognised licence. CC-BY needs an author; a purchased licence needs its name and an order reference.
+  - It optimises the model (meshopt geometry, WebP textures) and enforces a size budget per kind.
+  - It records the model in `public/models/licensed/inventory.json`.
+  - Each imported model is credited here by file name. `src/lib/__tests__/modelLicensing.test.ts` fails otherwise.
+- None are imported yet.
+
 ## Characters
 
 - **Operator rig** (`public/characters/glb/operator.glb`): a skinned body with rifle animation clips from Adobe [Mixamo](https://www.mixamo.com), assembled by `scripts/build_operator_glb.py`.
