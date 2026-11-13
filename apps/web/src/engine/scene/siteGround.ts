@@ -10,8 +10,10 @@ export function makeSiteGround(earth: PbrMaps, concrete: PbrMaps, site: LevelId 
   const second = paved ? earth : concrete
   const mat = makeTriplanarMaterial(main, { color: tint, roughness: .96, metalness: 0 }, {
     metresPerTile: paved ? 2.6 : 1.9,
-    detail: minimal ? 0 : 9.7, detailAmount: .45,
-    macro: minimal ? 0 : .11, macroAmount: .4,
+    detail: minimal ? 0 : 9.7, detailAmount: paved ? .6 : .45,
+    // Poured hardstanding read as one flat sheet past ten metres: stronger macro
+    // variation gives it the bays and stains a yard slab carries.
+    macro: minimal ? 0 : paved ? .07 : .11, macroAmount: paved ? .6 : .4,
   })
   if (!site || minimal) return mat
   const original = mat.onBeforeCompile, key = mat.customProgramCacheKey()

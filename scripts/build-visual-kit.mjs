@@ -2,7 +2,7 @@
 // No third-party models, textures, or runtime CSG. Run: node scripts/build-visual-kit.mjs
 import * as T from 'three'
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
+import { mergeGeometries, mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
@@ -14,9 +14,9 @@ globalThis.FileReader = class {
 const root = resolve(import.meta.dirname, '../apps/web/public/models/production')
 await mkdir(root, { recursive: true })
 const palette = {
-  alloy: new T.MeshStandardMaterial({ name: 'phosphated alloy', color: '#353b40', metalness: .8, roughness: .36 }),
-  polymer: new T.MeshStandardMaterial({ name: 'reinforced polymer', color: '#272b29', metalness: .03, roughness: .72 }),
-  edge: new T.MeshStandardMaterial({ name: 'machined steel', color: '#687078', metalness: .85, roughness: .29 }),
+  alloy: new T.MeshStandardMaterial({ name: 'phosphated alloy', color: '#2a2d30', metalness: .55, roughness: .5 }),
+  polymer: new T.MeshStandardMaterial({ name: 'reinforced polymer', color: '#5e5848', metalness: .02, roughness: .78 }),
+  edge: new T.MeshStandardMaterial({ name: 'machined steel', color: '#4f555b', metalness: .8, roughness: .34 }),
   rubber: new T.MeshStandardMaterial({ name: 'rubber', color: '#131717', metalness: 0, roughness: .91 }),
   paint: new T.MeshStandardMaterial({ name: 'powder coat', color: '#79806b', metalness: .28, roughness: .67 }),
   concrete: new T.MeshStandardMaterial({ name: 'cast concrete', color: '#aaa99e', roughness: .96 }),
@@ -30,43 +30,78 @@ function bevel(w,h,d,r=.005) {
 function part(g,x,y,z,rx=0,ry=0,rz=0) {g.applyMatrix4(new T.Matrix4().makeRotationFromEuler(new T.Euler(rx,ry,rz)));g.translate(x,y,z);return g.index?g.toNonIndexed():g}
 function model(name) {
  const group=new T.Group();group.name=name;const buckets=new Map()
- return {group, add(mat,g,x=0,y=0,z=0,rx=0,ry=0,rz=0) {if(!buckets.has(mat))buckets.set(mat,[]);buckets.get(mat).push(part(g,x,y,z,rx,ry,rz))}, finish(){for(const [mat,parts] of buckets){const mesh=new T.Mesh(mergeGeometries(parts),palette[mat]);mesh.name=mat;group.add(mesh)}return group}}
+ return {group, add(mat,g,x=0,y=0,z=0,rx=0,ry=0,rz=0) {if(!buckets.has(mat))buckets.set(mat,[]);buckets.get(mat).push(part(g,x,y,z,rx,ry,rz))}, finish(){for(const [mat,parts] of buckets){const merged=mergeGeometries(parts);merged.deleteAttribute('uv');const mesh=new T.Mesh(mergeVertices(merged,1e-5),palette[mat]);mesh.name=mat;group.add(mesh)}return group}}
 }
+// ── Service carbine ─────────────────────────────────────────────────────────
+// Built the way the real thing reads: side PROFILES (receiver, grip, stock, magazine)
+// extruded to their width with chamfered edges that catch light, and turned parts
+// (barrel, gas block, muzzle device, buffer tube) lathed from their radius profile.
+// Bore axis at y=0.02; z runs butt (-0.44) to muzzle (+0.45). A generic carbine, no
+// manufacturer's design or markings.
 const rifle=model('CZ service carbine')
 const box=(m,mat,w,h,d,x,y,z,rx=0,ry=0,rz=0,r=.004)=>m.add(mat,bevel(w,h,d,Math.min(r,w/5,h/5,d/5)),x,y,z,rx,ry,rz)
-// Receiver, lower, buffer, adjustable stock: clear functional silhouettes.
-box(rifle,'alloy',.065,.072,.24,0,.005,-.045)
-box(rifle,'alloy',.059,.048,.17,0,-.047,-.065)
-box(rifle,'polymer',.048,.115,.062,0,-.113,-.115,-.24)
-box(rifle,'polymer',.046,.10,.21,0,-.012,-.322)
-box(rifle,'rubber',.052,.13,.018,0,-.025,-.431)
-rifle.add('edge',new T.CylinderGeometry(.016,.016,.16,16),0,.01,-.24,Math.PI/2)
-// Handguard with machined recesses: rails leave open gaps rather than a solid slab.
-box(rifle,'alloy',.061,.018,.24,0,.038,.16)
-box(rifle,'alloy',.055,.014,.24,0,-.033,.16)
-for(const side of [-1,1]) {
- box(rifle,'alloy',.009,.038,.24,side*.031,.005,.16)
- for(let i=0;i<7;i++) box(rifle,'rubber',.002,.012,.020,side*.036,.009,.067+i*.030)
+// A side profile in (z, y), extruded across x by `w`, centred on x. Bevel = chamfer size.
+function profile(pts,w,bevel=.0025,curves=[]) {
+ const s=new T.Shape();s.moveTo(pts[0][0],pts[0][1])
+ for(let i=1;i<pts.length;i++){const c=curves[i];if(c)s.quadraticCurveTo(c[0],c[1],pts[i][0],pts[i][1]);else s.lineTo(pts[i][0],pts[i][1])}
+ s.closePath()
+ const g=new T.ExtrudeGeometry(s,{depth:w-2*bevel,bevelEnabled:true,bevelThickness:bevel,bevelSize:bevel,bevelSegments:2,curveSegments:6,steps:1})
+ g.translate(0,0,-(w-2*bevel)/2);g.rotateY(-Math.PI/2);return g
 }
-// Barrel, gas block and open muzzle crown, all with smooth radial normals.
-rifle.add('alloy',new T.CylinderGeometry(.009,.009,.36,16),0,.007,.25,Math.PI/2)
-box(rifle,'edge',.025,.034,.026,0,.01,.288)
-rifle.add('alloy',new T.CylinderGeometry(.016,.016,.035,16,1,true),0,.007,.4225,Math.PI/2)
-rifle.add('edge',new T.TorusGeometry(.012,.004,6,16),0,.007,.440)
-// Continuous rail and separate teeth, rear aperture/front post remain below eye line.
-box(rifle,'alloy',.027,.012,.47,0,.054,.045)
-for(let i=0;i<30;i++) box(rifle,'edge',.032,.007,.007,0,.063,-.18+i*.015)
-for(const z of [-.145,.265]) {box(rifle,'alloy',.028,.033,.018,0,.080,z);box(rifle,'edge',.007,.025,.009,0,.103,z)}
-// Controls, ejection port, pins; small parts share materials/draws.
-box(rifle,'rubber',.002,.027,.075,.034,.013,-.015)
-box(rifle,'edge',.006,.008,.056,.037,-.003,-.015)
-for(const z of [-.11,.025]) rifle.add('edge',new T.CylinderGeometry(.004,.004,.068,10),0,-.041,z,0,0,Math.PI/2)
-// Magazine is a named detachable node for the reload animation.
+// A turned part along z from radius profile [[z, r], ...].
+function turned(pts,seg=20) {
+ const g=new T.LatheGeometry(pts.map(([z,r])=>new T.Vector2(r,z)),seg)
+ g.rotateX(Math.PI/2);return g
+}
+const BORE=.02
+// Upper receiver: flat top, ejection-port side, forward assist hump at the rear right.
+rifle.add('alloy',profile([[-.17,.0],[.07,.0],[.07,.046],[-.15,.046],[-.17,.036]],.054,.003))
+box(rifle,'edge',.003,.02,.058,.028,.022,-.035)            // ejection port cover
+rifle.add('edge',new T.CylinderGeometry(.007,.008,.03,14),.03,.03,-.12,0,0,Math.PI/2.3) // forward assist
+box(rifle,'alloy',.04,.012,.03,0,.04,-.165)                 // charging handle latch
+// Lower receiver with its magwell flare and the trigger guard.
+rifle.add('alloy',profile([[-.17,.0],[.065,.0],[.065,-.012],[.045,-.022],[.042,-.072],[-.045,-.072],[-.05,-.03],[-.105,-.03],[-.12,-.045],[-.17,-.03]],.05,.003))
+rifle.add('alloy',profile([[-.045,-.045],[-.035,-.045],[-.03,-.072],[-.095,-.07],[-.105,-.045],[-.095,-.045],[-.093,-.062],[-.04,-.064]],.014,.0015))
+box(rifle,'edge',.004,.026,.006,0,-.052,-.065,.35)          // trigger
+rifle.add('edge',new T.CylinderGeometry(.0035,.0035,.056,10),0,-.012,-.14,0,0,Math.PI/2) // pins
+rifle.add('edge',new T.CylinderGeometry(.0035,.0035,.056,10),0,-.012,.045,0,0,Math.PI/2)
+box(rifle,'edge',.004,.012,.018,.027,-.018,-.115)            // selector
+box(rifle,'edge',.004,.02,.014,-.027,-.03,.0)               // bolt release
+// Pistol grip: raked back, finger swell at the front, rounded heel.
+rifle.add('polymer',profile([[-.075,-.03],[-.11,-.03],[-.15,-.13],[-.13,-.15],[-.112,-.148],[-.083,-.06]],.032,.004,[null,null,[-.135,-.08],[-.152,-.152],null,[-.088,-.11]]))
+for(let i=0;i<4;i++) box(rifle,'rubber',.034,.003,.012,0,-.06-i*.022,-.118-i*.007,-.42)
+// Handguard: a rounded free-float tube with slots, top rail continuous with the receiver.
+{const s=new T.Shape(),w=.025,h=.026,r=.011
+ s.moveTo(-w+r,-h);s.lineTo(w-r,-h);s.quadraticCurveTo(w,-h,w,-h+r);s.lineTo(w,h-r);s.quadraticCurveTo(w,h,w-r,h);s.lineTo(-w+r,h);s.quadraticCurveTo(-w,h,-w,h-r);s.lineTo(-w,-h+r);s.quadraticCurveTo(-w,-h,-w+r,-h)
+ const g=new T.ExtrudeGeometry(s,{depth:.3,bevelEnabled:true,bevelThickness:.003,bevelSize:.003,bevelSegments:2,curveSegments:4,steps:1})
+ rifle.add('alloy',g,0,BORE+.002,.072)}
+for(const side of [-1,1]) for(let i=0;i<5;i++) box(rifle,'rubber',.002,.007,.032,side*.0285,BORE-.002,.105+i*.05,0,0,0,.002)
+for(let i=0;i<5;i++) box(rifle,'rubber',.03,.002,.032,0,BORE-.0285,.105+i*.05,0,0,0,.002)
+box(rifle,'alloy',.022,.01,.53,0,.05,.1,0,0,0,.0015)          // top rail
+for(let i=0;i<34;i++) box(rifle,'edge',.024,.004,.006,0,.057,-.155+i*.0155,0,0,0,.001)
+// Barrel, gas block and a slotted muzzle device, all turned.
+rifle.add('alloy',turned([[.36,0],[.36,.0105],[.37,.009],[.43,.0085],[.43,0]]),0,BORE,0)
+rifle.add('edge',turned([[.4,0],[.4,.012],[.402,.0135],[.446,.0135],[.449,.011],[.449,0]],16),0,BORE,0)
+for(let i=0;i<3;i++) box(rifle,'rubber',.029,.0035,.007,0,BORE+.006,.411+i*.011,0,0,0,.001)
+// Iron sights folded low on the rail, so they never sit in the sight picture.
+box(rifle,'alloy',.024,.012,.03,0,.066,-.13,0,0,0,.002)
+box(rifle,'alloy',.022,.012,.028,0,.066,.33,0,0,0,.002)
+// Buffer tube, collapsible stock (cheek riser, sling slot, rubber butt pad). A named node:
+// shouldered, the stock is under the cheek and out of sight, so the viewmodel hides it.
+const stock=model('stock')
+stock.add('alloy',turned([[-.36,0],[-.36,.015],[-.17,.015],[-.165,.017],[-.16,0]]),0,.016,0)
+box(stock,'alloy',.03,.01,.012,0,.004,-.172)                   // castle nut / end plate
+stock.add('polymer',profile([[-.25,.034],[-.42,.04],[-.43,.03],[-.43,-.075],[-.405,-.085],[-.35,-.02],[-.27,-.008],[-.25,.0]],.042,.005,[null,null,null,null,null,[-.37,-.07],null,null]))
+box(stock,'rubber',.046,.122,.016,0,-.019,-.437,0,0,0,.004)
+box(stock,'rubber',.044,.008,.05,0,.04,-.33,0,0,0,.002)
+rifle.group.add(stock.finish())
+// Magazine, a separate node for the reload: slightly curved, ribbed, with a base plate.
 const magazine=model('magazine')
-box(magazine,'polymer',.043,.155,.078,0,-.143,.006,.10)
-for(let i=0;i<5;i++) box(magazine,'rubber',.045,.006,.080,0,-.09-i*.025,.006,.10)
+magazine.add('polymer',profile([[-.04,-.065],[.036,-.065],[.042,-.15],[.058,-.235],[-.012,-.245],[-.026,-.155]],.026,.003,[null,null,[.039,-.11],[.05,-.2],null,[-.022,-.2]]))
+for(let i=0;i<4;i++) magazine.add('rubber',profile([[-.024-i*.002,-.09-i*.035],[.04+i*.004,-.09-i*.035],[.041+i*.004,-.094-i*.035],[-.025-i*.002,-.094-i*.035]],.028,.0008))
+magazine.add('rubber',profile([[-.016,-.238],[.062,-.229],[.064,-.243],[-.014,-.252]],.03,.0025))
 rifle.group.add(magazine.finish())
-const rifleGroup=rifle.finish();rifleGroup.userData={license:'MIT',units:'metres',barrelAxis:'+Z',length:.88,authored:true}
+const rifleGroup=rifle.finish();rifleGroup.userData={license:'MIT',units:'metres',barrelAxis:'+Z',length:.895,authored:true}
 
 // Unit-envelope modules; instances scale to the existing collision boxes exactly.
 const kit=new T.Group();kit.name='CZ modular production kit'
@@ -74,7 +109,8 @@ const container=model('container')
 box(container,'paint',.97,.96,.97,0,0,0,0,0,0,.007)
 for(const x of [-.48,.48])for(const z of [-.48,.48])box(container,'edge',.04,1,.04,x,0,z)
 for(const y of [-.48,.48])box(container,'edge',1,.04,1,0,y,0)
-for(let i=0;i<17;i++)for(const x of [-.491,.491])box(container,'paint',.018,.90,.025,x,0,-.44+i*.055)
+// Ribs are plain boxes: bevels on 34 of them cost 1,500 triangles nobody sees at range.
+for(let i=0;i<15;i++)for(const x of [-.491,.491])container.add('paint',new T.BoxGeometry(.018,.90,.03),x,0,-.43+i*.0614)
 for(const z of [-.49,.49])for(const x of [-.24,.24])box(container,'edge',.018,.88,.018,x,0,z)
 kit.add(container.finish())
 const barrier=model('barrier')
@@ -119,7 +155,8 @@ async function save(name,group) {
  const glb=await new GLTFExporter().parseAsync(group,{binary:true,onlyVisible:true})
  await writeFile(resolve(root,name),Buffer.from(glb))
  let tris=0,meshes=0;group.traverse(o=>{if(o.isMesh){meshes++;tris+=(o.geometry.index?.count??o.geometry.attributes.position.count)/3}})
- return {file:name,bytes:glb.byteLength,triangles:tris,primitives:meshes,license:'MIT',source:'scripts/build-visual-kit.mjs'}
+ const modules={};for(const c of group.children){let t=0;c.traverse(o=>{if(o.isMesh)t+=(o.geometry.index?.count??o.geometry.attributes.position.count)/3});modules[c.name]=t}
+ return {file:name,bytes:glb.byteLength,triangles:tris,primitives:meshes,...(name.includes('kit')?{modules}:{}),license:'MIT',source:'scripts/build-visual-kit.mjs'}
 }
 const inventory=[await save('service-carbine.glb',rifleGroup),await save('modular-kit.glb',kit)]
 await writeFile(resolve(root,'inventory.json'),JSON.stringify(inventory,null,2)+'\n')

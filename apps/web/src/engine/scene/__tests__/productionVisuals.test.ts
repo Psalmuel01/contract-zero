@@ -31,17 +31,23 @@ describe('production visual assets and gameplay boundaries', () => {
       for (const axis of ['x','y','z'] as const) {expect(b.min[axis]).toBeGreaterThanOrEqual(-.501);expect(b.max[axis]).toBeLessThanOrEqual(.501)}
     }
   })
-  it('never raises terrain inside a playable site or its five metre safety apron', () => {
+  it('never raises terrain inside a playable site, nor before the perimeter wall 15 m out (it buried its base)', () => {
     for (const level of Object.values(LEVELS)) {
       const b=level.bounds
-      for(let x=b.minX-4;x<=b.maxX+4;x+=2)for(let z=b.minZ-2;z<=b.maxZ+2;z+=2) expect(terrainHeight(level,x,z)).toBeCloseTo(-.065)
+      for(let x=b.minX-18;x<=b.maxX+18;x+=2)for(let z=b.minZ-18;z<=b.maxZ+18;z+=2) {
+        if (Math.hypot(Math.max(b.minX-x,0,x-b.maxX), Math.max(b.minZ-z,0,z-b.maxZ)) > 18) continue
+        expect(terrainHeight(level,x,z)).toBeCloseTo(-.065)
+      }
       const high=buildTerrainApron(level),low=buildTerrainApron(level,true)
       expect(low.attributes.position.count).toBeLessThan(high.attributes.position.count)
       for(const g of [high,low]) {expect(g.boundingSphere?.radius).toBeGreaterThan(0);expect([...g.attributes.normal.array].every(Number.isFinite)).toBe(true);g.dispose()}
     }
   })
   it('keeps stocks ahead of the eye during recoil and returns reload parts to rest', () => {
-    for (const len of [.26,.52,.88,1.16]) expect(safeWeaponDepth(.1,len)+len/2).toBeLessThanOrEqual(-.089)
+    for (const len of [.26,.52,.88,1.16]) {
+      expect(safeWeaponDepth(.1,len)+len*.15).toBeLessThanOrEqual(-.099) // at the hip the stock may pass the eye, the grip may not
+      expect(safeWeaponDepth(.1,len,1,1)+len/2).toBeLessThanOrEqual(-.099) // aimed, the whole weapon stays ahead
+    }
     for(const p of [0,1]) expect(reloadPose(p,true,false).magazineDrop).toBe(0)
     expect(reloadPose(.5,true,false).magazineDrop).toBeGreaterThan(.1)
     expect(reloadPose(.5,true,true).dip).toBe(0)

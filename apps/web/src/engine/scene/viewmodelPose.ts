@@ -9,7 +9,17 @@ export function reloadPose(progress: number, active: boolean, reduceMotion: bool
   return { dip: hold * .055, roll: hold * -.22, magazineDrop: mag * .19, handReach: mag * .10 }
 }
 
-/** Keep the whole weapon ahead of the eye even during recoil and near-wall poses. */
-export function safeWeaponDepth(requested: number, length: number, scale = 1): number {
-  return Math.min(requested, -(length * scale / 2 + .09))
+/**
+ * How close the weapon may come to the eye, as the depth of its centre.
+ *
+ * The STOCK is allowed to run back past the eye: that is how a shouldered weapon is
+ * framed (it leaves through the bottom corner, off-screen and beside the camera, never
+ * through it). Holding the whole weapon in front of the eye instead pushes it out into a
+ * giant side-on slab. What must stay ahead is the grip and receiver, the part in view:
+ * the point 15% of the length behind the centre keeps 10 cm of clearance.
+ */
+export function safeWeaponDepth(requested: number, length: number, scale = 1, aimed = 0): number {
+  // Aimed, the weapon is on the centre line, so the whole of it stays ahead of the eye.
+  const behind = length * scale * (.15 + .35 * aimed)
+  return Math.min(requested, -(behind + .1))
 }

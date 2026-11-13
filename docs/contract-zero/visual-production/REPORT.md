@@ -1,125 +1,170 @@
-# Visual production pass — implementation and review status
+# Visual production pass: report
 
-Date: 2026-11-12. **Status: initial implementation, not visually accepted.**
+Date: 2026-11-13. **Status: the biggest weaknesses are fixed and measured; the acceptance
+standard is not met.** The sites read as cleaner and more coherent than before, and the
+weapon is a real carbine held like one. They do not yet read as production art.
+The limits are at the end.
 
-The requested acceptance standard requires ordinary gameplay inspection, matched-view
-captures, representative hardware measurements and an audible gameplay recording.
-Those checks have not been completed. Automated tests cannot establish visual quality.
+All captures are from the running game (`/dev/level`, seed 4, defense 2, assault
+rifle, 1280×720, High). They were rendered on this machine's GPU (Apple M2) in headless Chrome.
+The "before" build is the previous commit, `92be973`, served from a separate worktree on
+another port. Both builds share fixed camera positions and hours, so every pair is the
+same frame. See [GALLERY.md](GALLERY.md).
 
-## Baseline and evidence
+## How this pass started
 
-- Source revision and original GLB measurements: [baseline.json](baseline.json).
-- Existing art direction: [reference pack](../../../artifacts/visual-references/README.md).
-- Archived gameplay: [gallery](GALLERY.md). These are historical images, not fresh
-  captures at controlled viewpoints. Copies are also in local, git-ignored
-  `artifacts/visual-production/before/`.
-- Native Brave was available, but its screenshot API returned a uniform grey image.
-  Its accessibility tree exposed browser chrome but no game content. Browser tab
-  automation was unavailable. No usable new gameplay captures were obtained.
-- Previous GPU timings in [PERFORMANCE.md](../PERFORMANCE.md) are historical and must
-  not be attributed to this change. Fresh FPS, p95 frame time, draw-pass counts,
-  GPU/JS memory and real mobile measurements are **not available** for this pass.
+A first attempt at this brief was staged on the branch without any captures (its notes
+said the browser returned blank screenshots). Once rendered, several of its changes had
+made things **worse** than before:
 
-## Audit
-
-| Area | Existing implementation / finding | Change or remaining work |
+| Defect found in the staged attempt | Cause | Fix |
 | --- | --- | --- |
-| Weapon | Poly Pizza AR: 1,930 triangles; no detachable magazine | Original 3,380-triangle GLB carbine; six primitives including separate magazine materials |
-| Hands | Merged bevelled procedural gloves; hidden in ADS to protect sight picture | Existing geometry retained; support hand follows reload pose. A production skinned hand rig remains outstanding |
-| Reload | Simulation and audio present, little visible magazine motion | Presentation-only magazine extraction/insertion and weapon tilt driven by existing reload timing |
-| Near-wall gun | Multiplying weapon depth toward zero could push the stock toward/through the eye | Depth bounded by actual weapon length; close-wall pose lowers the muzzle instead |
-| Surface scale | LevelArt's helper used normal UV materials on scaled unit boxes | Uses world-space PBR mapping; shader now applies instance transforms and normal correction |
-| Ground | Same burned-earth set across all sites, very broad flat apron | Concrete for Blacksite/refinery; world-space earth/concrete weather patches on higher tiers |
-| Terrain | Distant silhouette rings and flat connecting disc | Normal-lit, vertex-coloured relief outside bounds plus five-metre safety apron; playable ground remains flat |
-| Foreground art | Primitive containers, two-box barriers, crate-like cases/trucks/pumps | Original GLB kit replaces those categories on High/Medium, still instanced |
-| Lighting | Existing phase themes, PMREM environment, sun shadows and practicals | Preserved rather than blindly retuned without a live image; full art-directed lighting review remains pending |
-| Character animation | Existing Mixamo operator clips and conservative skinned bounds | Retained; close-range intersection/pose review remains pending |
-| HUD | Desktop instructions low-contrast over bright skies | Added dark backing and brighter instruction text; comprehensive HUD/tutorial overlap review remains pending |
-| Environment life | Existing steam, flare, machinery audio and real line-down/delivery cues | Retained. No invented production activity or economic consequences added |
-| Bottlenecks | Prior measurements identify high-DPR post-processing/fill rate, skinned geometry and light count | No new post effects, shadow lights, particles or textures. Current hardware profile remains pending |
+| Jersey barriers glowed white at every hour, night included | Kit modules kept flat glTF colours; pale "cast concrete" under the sun and the environment light | Kit surfaces are dressed with the site's own textured materials (`KIT_SURFACE` in `LevelArt.tsx`) |
+| Blacksite: a flat teal ramp buried the base of the perimeter wall | Terrain relief started rising 5 m outside the bounds; the perimeter wall stands 15 m out | Relief starts 20 m out (`RELIEF_FROM`), tested to 18 m |
+| A pale, nearly white band between the yard and the hills (Dustline) | The apron used the floor *tint* (made to multiply a dark texture) as a plain colour | Apron colour taken to the texture's brightness, then into the haze |
+| Walls became a camouflage pattern (Cinder Yard, Blacksite's hall) | World-scaled textures at 1.5 m tiled the damaged-plaster photo (cream with brick through it) and the corrugated sheet's rust patches | Interior walls use the concrete render; corrugated cladding keeps its relief under a flat paint; plate and sheet at their real 2.4 to 2.8 m |
+| The rifle: a large grey slab filling the corner | A boxy model, and a depth rule that held the whole weapon, stock included, in front of the eye | A new carbine (below); the stock may pass the eye at the hip, the grip may not |
+| Draw calls over the 270 budget (Cinder Yard night 272 at the start view) | One draw per glTF material per module, doubled by shadows | Kit surfaces merged per site material, kept to one or two per module; small cases cast no shadow |
 
-## Asset production and budgets
+The staged attempt's other changes were sound and are kept:
+- world-space mapping of the level-art boxes, with the instanced-normal correction;
+- the reload's magazine drop;
+- the wall-lowering pose;
+- the backed control help panel.
 
-Rebuild originals with `node scripts/build-visual-kit.mjs` from the repository root.
-No Blender, downloaded assets, image generation or runtime CSG is needed. The source
-keeps model authoring separate from gameplay and emits standard glTF 2.0 PBR GLBs.
+## What changed
 
-| Asset | Bytes | Triangles | Primitives | Licence |
-| --- | ---: | ---: | ---: | --- |
-| service-carbine.glb | 330,688 | 3,380 | 6 | Original, MIT |
-| modular-kit.glb | 401,088 | 4,048 total across five modules | 14 | Original, MIT |
+### First-person weapon
 
-Full per-file provenance: [inventory.json](../../../apps/web/public/models/production/inventory.json)
-and [CREDITS.md](../../../apps/web/CREDITS.md). The old rifle stays available for guards.
-New model payload totals 731,776 bytes, approximately 715 KiB before HTTP compression.
-The kit contains container, jersey barrier, equipment case, truck and pump modules.
-It is not yet a complete building/vehicle/industrial production library.
+- **A new service carbine** (`scripts/build-visual-kit.mjs`, original, MIT). Its parts are built from side profiles extruded to their width with chamfered edges:
+  - upper and lower receivers, with the magwell flare and trigger guard;
+  - a raked pistol grip;
+  - a curved magazine;
+  - an adjustable stock.
 
-All modules fit a unit envelope and scale to existing collision boxes. Truck wheel
-proportions are authored for a typical logistics-truck aspect ratio; unusual collider
-aspect ratios still need visual review. Barriers use a real sloping jersey section;
-the existing conservative AABB collision remains, including its empty upper corners.
+  Lathed (turned) parts:
+  - the barrel;
+  - the slotted muzzle device;
+  - the buffer tube.
 
-Repeated modules use instancing, with one material group per surface, rather than
-one render object per detail. Low retains the original simple representations.
-Terrain apron: 10,368 triangles on High/Medium, 1,568 on Low. It remains below the
-walkable surface throughout the playable bounds and their five-metre safety apron.
-The distant skyline rings are unchanged. No mesh or height changes were made to
-colliders, navigation, objectives or server-exported layouts.
+  It also has a rounded, slotted handguard and a continuous top rail, with iron sights folded low. It is 4,932 triangles and 256 KB, against the staged model's 3,380 triangles and 331 KB; indexed geometry and no UVs make the difference. The magazine and stock are named parts.
+- **Framing at the hip:** the carbine sits back, so the stock leaves through the bottom corner and the receiver and handguard carry the frame.
+- **Aimed:** the carbine is shouldered on the centre line, with the top rail 2.7 cm under the eye. You look along the rail to the front sight, and the stock (under your cheek) is hidden, as the hands already were. Before, it swung to 10 cm right of the eye and you looked at its flank.
+- **Against a wall:** it lowers, and never passes through (checked).
+- **Unchanged:** fire rate, damage, reload time, inventory, ownership. Everything above is presentation.
 
-The kit is currently loaded even on Low, although Low does not draw it. No additional
-texture sets are introduced: ground blending reuses existing URL-cached PBR sets.
-The established colour-only path remains. Secondary diffuse/roughness are blended;
-normal detail currently follows the primary surface. Low omits the blending shader.
-KTX2/Basis texture conversion, authored texture atlases and distance-based module LOD
-are not implemented. They should follow measurements, not assumptions about cost.
+### Environment
 
-## Verification performed
+- **Roads:** these were an untextured dark slab, the largest surface at two site gates. They now use CC0 asphalt (`asphalt_02`, Poly Haven, credited), recompressed to 1.3 MB for the set.
+- **Kit modules** (container, barrier, case, truck, pump):
+  - they take the site's textured materials, tinted by site and hour;
+  - container ribs are plain boxes;
+  - the kit went from 4,048 triangles and 401 KB to 2,912 triangles and 142 KB.
+- **Terrain relief:** it begins beyond the perimeter wall, on a coarser grid (4.6k triangles rather than 10k), coloured to meet the yard.
+- **Paved yards** (Blacksite, Cinder Yard): stronger large-scale variation, so the slab no longer reads as one flat sheet past 10 m.
+- **Texture scale:** each texture sits at its real size; the camouflage tiling is gone.
 
-- Web TypeScript check passed.
-- Full web suite: 75 files / 918 tests passed before the final asset extensions.
-- Focused scene suite: 98 tests passed after instanced shader correction.
-- Final generated asset bounds/material/load and presentation checks: all five tests
-  passed after truck and pump additions, including the corrected wheel envelope.
-- GLBs are parsed by Three's GLTFLoader in tests, not merely checked for file existence.
-- Ground shader string transformations are tested against Three's standard shader;
-  this is **not a GPU shader-compilation test**.
-- Production build initially failed resolving Google Fonts; retry with network access
-  completed successfully and prerendered all 18 routes.
+### Interface
 
-## Required live review
+- **Mouse-capture hint:** it shows until the first keypress. It no longer sits across the crosshair: it moved below the centre, with a darker backing and brighter text.
 
-Use the existing dev-only route `/dev/level` at 1280×720, seed 4, defense 2, assault
-rifle, identical camera pose and tier for each comparison. Compare ordinary movement
-as well as stills. Use the existing test/probe routes only in development.
+### Also fixed in this session
 
-| Site | Day | Dusk | Night | Combat/objectives/extraction | Mobile | FPS/memory/video |
-| --- | --- | --- | --- | --- | --- | --- |
-| Dustline Depot | Pending | Pending | Pending | Pending | Pending | Pending |
-| Blacksite | Pending | Pending | Pending | Pending | Pending | Pending |
-| Cinder Yard | Pending | Pending | Pending | Pending | Pending | Pending |
+- **Stairs** (committed separately as `927a505`): you were lifted onto the Cinder Yard catwalk by walking under it, or into the stair's side. The floor now only steps up what you can reach. The catwalk probe walks both cases.
 
-Existing commands available for the next review:
+## Measurements
 
-```sh
-node apps/web/probe-levels.mjs
-node apps/web/probe-field.mjs
-node apps/web/probe-catwalk.mjs
-node apps/web/probe-world-cues.mjs
-node apps/web/probe-perf.mjs http://localhost:3000 gpu
-node apps/web/probe-site-budgets.mjs
-node apps/web/probe-texture-tiers.mjs
-node apps/web/probe-auto-stepdown.mjs
-node apps/web/probe-audio-combat.mjs
-```
+### Render load at the start view (`probe-site-budgets`, ceiling 270 calls / 140k triangles)
 
-Inspect each probe's renderer flags: software-rendered or CPU-throttled results do
-not establish real GPU or phone performance. Existing audio meter probes do not
-replace listening or a recording with actual game audio. Videos captured by a browser
-recorder without loopback audio do not satisfy the brief.
+| Site | Before, day / night | After, day / night |
+| --- | --- | --- |
+| Dustline Depot | 176 / 193 calls, 37k tris | 190 / 207 calls, 75k tris |
+| Blacksite | 200 / 216 calls, 103 to 114k tris | 211 / 230 calls, 117 to 122k tris |
+| Cinder Yard | 239 / 256 calls, 59k tris | 252 / **269** calls, 78k tris |
 
-Remaining production work includes a fully authored animated hand rig, the remaining
-primary weapon art, complete modular architecture, close-range material finishing,
-walkable terrain relief if simulation/server heights are expanded together, lighting
-and exposure tuning from real captures, texture compression, and the full review
-matrix above. Do not describe this pass as meeting the final acceptance standard yet.
+All six pass. **Cinder Yard at night sits 1 call under the ceiling**, so any new surface there must pay for itself.
+
+Looking down at the ground (the vistas' worst case), the counts run higher in both builds:
+- **Before:** 239 to 269.
+- **After:** 255 to 284.
+
+The extra triangles are the kit's real shapes and the terrain apron.
+
+### Frame time on this machine's GPU (`GPU=1 probe-site-perf`, uncapped, 6 to 8 s per sample)
+
+Median frame time, ms, before → after:
+
+| Site | High, day | High, night | Low, day | Touch tier, day |
+| --- | --- | --- | --- | --- |
+| Dustline Depot | 6.5 → 6.8 | 6.7–7.5 → 7.5–8.8 | 3.4 → 4.0 | 5.1 → 5.9 |
+| Blacksite | 8.0 → 8.5 | 8.1–11.5 → 8.4–10.0 | 4.9 → 5.1 | 6.6 → 6.7 |
+| Cinder Yard | 8.8 → 8.2 | 8.0–10.0 → 8.7–12.0 | 6.2 → 5.6 | 7.5 → 7.1 |
+
+**Medians move by under a millisecond.**
+
+**The 95th-percentile frame at night on High is noisy in both builds:**
+- **Before:** 12.6 to 28 ms.
+- **After:** 17.6 to 30 ms.
+
+Over repeated runs, Dustline's night tail looks about 5 ms worse after (21 to 24 ms against 13 to 18 ms). The other sites overlap.
+
+**JS heap is 140 to 190 MB in both builds.** GPU textures rise by 3 to 4 (the asphalt). The full-tier texture budget test passes with it counted.
+
+**This is an M2 Mac. It is not a phone or a low-end laptop.** The touch tier was emulated (a phone viewport and touch input), not run on a device.
+
+### Weapon states (`probe-viewmodel.mjs`)
+
+These were checked by eye on all three sites:
+- at the hip;
+- aimed;
+- reload, magazine out;
+- reload, magazine in;
+- nose to a wall;
+- Low tier;
+- phone.
+
+No clipping into the wall was seen, and the aimed view is clear of the stock and hands.
+
+### Gameplay and collision
+
+Nothing that collides moved: colliders, navigation, objectives and server layouts are unchanged. Relief and props are outside the bounds or on the existing collider boxes.
+
+- **Tests:** 923 web unit tests pass, including:
+  - the deck/stair cases;
+  - terrain flat to 18 m;
+  - kit envelopes;
+  - the texture budget.
+- **`probe-catwalk`:** 9 of 9.
+- **`probe-auto-stepdown`:** passes (the level stays spread after Auto drops a tier).
+- **The recording below** plays a whole raid: contact, loading three cases, the extraction call, extraction.
+
+### Recording with the game's audio
+
+`apps/web/demo-out/contract-zero-visual-pass.mp4` (git-ignored; regenerate with `SEG=3 node apps/web/probe-record-demo.mjs <dir>`):
+- **Content:** a 43 s Cinder Yard raid at dusk, with arrival, contact, the push, three cases loaded and extraction.
+- **Audio:** the final mix, −19.5 LUFS, true peak −4.2 dBFS.
+- **Not played by a person:** the raid is scripted, as before.
+
+The previous recording (`contract-zero-living-world.mp4`, pass 2) shows the same raid with the old rifle, the untextured road and the pre-pass props.
+
+## Asset inventory
+
+| Asset | Bytes | Triangles | Licence |
+| --- | ---: | ---: | --- |
+| `models/production/service-carbine.glb` | 256,116 | 4,932 | Original, MIT |
+| `models/production/modular-kit.glb` | 142,104 | 2,912 (container 844, barrier 28, case 396, truck 1,224, pump 420) | Original, MIT |
+| `textures/hangar/asphalt_02_{diff,nor_gl,rough}_1k.jpg` | 1,301,935 | n/a | CC0, Poly Haven (Rob Tuytel) |
+
+Generated details: [inventory.json](../../../apps/web/public/models/production/inventory.json). Provenance: [CREDITS.md](../../../apps/web/CREDITS.md). Rebuild the models with `node scripts/build-visual-kit.mjs`.
+
+## Remaining limits (what this pass did not achieve)
+
+- **Not production art.** The kit is five modules. Buildings, the refinery's plant and the Blacksite hall are still the original boxes with better surfaces, and the hall interior is a bare concrete box. "Facilities that feel constructed for a real purpose" needs authored architecture, which this pass did not attempt.
+- **The playable ground is flat.** Relief is only beyond the wall. Walkable relief needs the simulation, navigation and server to learn the same heights.
+- **Hands are the existing procedural gloves.** There is no skinned, animated hand rig. The reload is presentation curves, not an animation.
+- **On the bench, the carbine's stock looks heavy.** It is hidden when aimed and off-screen at the hip, but it shows in third person and on the bench.
+- **Lighting was not re-art-directed.** Day, dusk and night are the existing themes and grades from pass 2. No ambient occlusion was added.
+- **No real phone or low-end GPU was measured.** The numbers above are one M2 Mac.
+- **No KTX2/Basis texture compression and no distance LOD.** The draw-call budget, not triangle count, is the binding limit, and Cinder Yard at night is at it.
+- **Night p95 on High is noisy, and Dustline's looks ~5 ms worse.** Not diagnosed.
+- **The recording is scripted, not played.**

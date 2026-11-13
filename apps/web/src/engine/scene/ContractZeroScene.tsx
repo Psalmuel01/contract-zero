@@ -1617,6 +1617,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     w.__czWakeRoom = (room: number) => sim.setRoomActive(room, true); // headless room activation
     w.__czSwitch = (n?: number) => (typeof n === 'number' ? sim.switchGun(n) : sim.nextWeapon());
     w.__czFire = (on: boolean) => { controls.current.fire = !!on; }; // headless: hold the trigger (aim-assist test)
+    w.__czAds = (on: boolean) => { controls.current.ads = !!on; }; // headless: aim down sights (viewmodel captures)
     w.__czToggle = (a: Attachment) => sim.toggleAttachment(a);
     // C3: WebGL resource + draw snapshot — the soak probe watches memory.geometries/
     // textures/programs for growth (a disposal leak) over a long run.
@@ -1650,7 +1651,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     return () => {
       delete w.__czState; delete w.__czKillAll; delete w.__czKillRoom; delete w.__czKillPlayer; delete w.__czAim; delete w.__czAudio;
       delete w.__czMission; delete w.__czEndless; delete w.__czWarp; delete w.__czSkipBriefing; delete w.__czFloor;
-      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czToggle;
+      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czAds; delete w.__czToggle;
       delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats; delete w.__czCull;
     };
   }, [sim, audio]);
@@ -1672,6 +1673,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   const tmp = useMemo(() => new THREE.Vector3(), []);
   const tmp2 = useMemo(() => new THREE.Vector3(), []);
+  const adsTarget = useMemo(() => new THREE.Vector3(), []);
   const fwd = useMemo(() => new THREE.Vector3(), []);
   const arrowWp = useMemo(() => new THREE.Vector3(), []);
   const arrowCs = useMemo(() => new THREE.Vector3(), []);
@@ -1986,6 +1988,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
      */
     const handsGroup = activeMesh.getObjectByName('hands');
     if (handsGroup) handsGroup.visible = adsCur.current < 0.45;
+    // Shouldered, the stock is under the cheek: drawn, it was a slab across the sight picture.
+    const stockNode = activeMesh.getObjectByName('stock');
+    if (stockNode) stockNode.visible = adsCur.current < 0.45;
     const reload = reloadPose((sim.time - reloadStartedAt.current) / sim.gun.reloadTime, sim.reloading, !!settingsRef?.current.access.reduceMotion);
     const magazine = activeMesh.getObjectByName('magazine');
     if (magazine) magazine.position.y = -reload.magazineDrop;
@@ -1998,6 +2003,11 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     if (vm) {
       const local = tmp.copy(VIEWMODEL_HIP).lerp(VIEWMODEL_ADS, adsCur.current);
       local.z += view.z; local.y += view.y;                 // where this weapon sits
+      if (view.ads) {
+        // A weapon with a real sight line: from its own hip pose to its shouldered one.
+        local.set(VIEWMODEL_HIP.x, VIEWMODEL_HIP.y + view.y, VIEWMODEL_HIP.z + view.z)
+          .lerp(adsTarget.set(...view.ads), adsCur.current);
+      }
       // bob: a gentle walk figure-8 on the viewmodel when moving
       const bob = BOB * (moving ? 1 : 0) * (settingsRef?.current.access.reduceMotion ? 0 : 1);
       local.x += Math.sin(bobPhase.current) * bob;
@@ -2018,7 +2028,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       // Lower the muzzle rather than pushing the stock through the eye plane.
       const wallLower = 1 - THREE.MathUtils.clamp(wallAhead / GUN_CLEAR, 0, 1);
       local.y -= wallLower * 0.14 + reload.dip;
-      local.z = safeWeaponDepth(local.z, GUN_LENGTH[activeId], view.scale);
+      local.z = safeWeaponDepth(local.z, GUN_LENGTH[activeId], view.scale, view.ads ? 0 : adsCur.current);
       vm.position.copy(cam.localToWorld(local));
       vm.quaternion.copy(cam.quaternion);
       vm.rotateX(-recoilP.current * 1.6 - wallLower * 0.65);
@@ -5085,9 +5095,11 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           </div>
         )}
 
-        {/* aim hint — desktop only (mobile has visible controls) */}
+        {/* aim hint — desktop only (mobile has visible controls). Below the centre, not
+            across it: until the mouse is captured it sat over the crosshair and whatever
+            you were trying to look at. */}
         {!isTouch && (
-          <div ref={(r) => { hud.current.lock = r; }} style={{ position: 'absolute', left: '50%', top: '44%', transform: 'translate(-50%,0)', fontSize: 13, color: '#9fb4c8', background: 'rgba(0,0,0,.45)', padding: '8px 14px', borderRadius: 6 }}>
+          <div ref={(r) => { hud.current.lock = r; }} style={{ position: 'absolute', left: '50%', top: '64%', transform: 'translate(-50%,0)', maxWidth: 'min(640px, 80vw)', textAlign: 'center', fontSize: 12, lineHeight: 1.5, color: '#c4ced7', background: 'rgba(8,12,16,.72)', padding: '7px 14px', borderRadius: 6 }}>
             AIM UP/DOWN: move the mouse (captures on your first keypress) · or use the ARROW KEYS · Esc releases the mouse, then EXIT / ⏸ are top-left
           </div>
         )}

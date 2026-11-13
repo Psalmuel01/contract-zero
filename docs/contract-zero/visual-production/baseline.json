@@ -20,6 +20,10 @@
       "materials": 2
     }
   ],
-  "hardware_measurements": null,
-  "capture_status": "Native browser screenshot returned blank; archived screenshots copied to before/. These are not fresh matched-view captures."
+  "hardware_measurements": {
+    "machine": "Apple M2 (10-core GPU), headless Chrome on the GPU, uncapped frame rate",
+    "probe": "GPU=1 PHASES=day,night node apps/web/probe-site-perf.mjs",
+    "note": "medians before/after and the night p95 ranges are in REPORT.md; not a phone or low-end laptop"
+  },
+  "capture_status": "Matched captures of 92be973 (before) and this pass (after) from fixed viewpoints on the GPU: see GALLERY.md. The archived screenshots are no longer used."
 }

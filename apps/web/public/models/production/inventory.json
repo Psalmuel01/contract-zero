@@ -1,17 +1,24 @@
 [
   {
     "file": "service-carbine.glb",
-    "bytes": 330688,
-    "triangles": 3380,
-    "primitives": 6,
+    "bytes": 256116,
+    "triangles": 4932,
+    "primitives": 9,
     "license": "MIT",
     "source": "scripts/build-visual-kit.mjs"
   },
   {
     "file": "modular-kit.glb",
-    "bytes": 401088,
-    "triangles": 4048,
+    "bytes": 142104,
+    "triangles": 2912,
     "primitives": 14,
+    "modules": {
+      "container": 844,
+      "barrier": 28,
+      "case": 396,
+      "truck": 1224,
+      "pump": 420
+    },
     "license": "MIT",
     "source": "scripts/build-visual-kit.mjs"
   }

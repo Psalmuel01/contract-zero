@@ -54,10 +54,18 @@ export const VIEWMODEL_ADS = new THREE.Vector3(0.1, -0.1, -0.5);
 // Each model is now normalised to its own real length (see gunModels.ts), so
 // `scale` is a small fudge for hand-fit, not a size proxy; z/y slide the weapon
 // in the hands (a long DMR sits pushed out, a pistol held in close).
-export const WEAPON_VIEW: Record<GunId, { scale: number; z: number; y: number }> = {
+/** `ads`: where this weapon sits once aimed, when it has a real sight line (replaces
+ *  VIEWMODEL_ADS and the hip offsets). Others keep the shared gentle raise. */
+export const WEAPON_VIEW: Record<GunId, { scale: number; z: number; y: number; ads?: [number, number, number] }> = {
   sidearm: { scale: 1.0, z: 0.16, y: 0.03 },  // a compact pistol, raised so the grip and hand read
   smg: { scale: 1.0, z: 0.08, y: 0.025 },     // stubby, snappy; raised so both hands read
-  assault_rifle: { scale: 1.0, z: 0, y: 0 },  // the baseline
+  // The service carbine: drawn back so the stock leaves through the corner and the
+  // receiver and handguard carry the frame.
+  // Aimed, it is shouldered: on the centre line with the top rail 2.7 cm under the eye
+  // (the model is centred on its bounds, which puts the rail top 0.149 above centre),
+  // so you look along the rail to the front sight and the stock passes under the eye.
+  // Off to the side, as the shared pose has it, you looked at its flank instead.
+  assault_rifle: { scale: 1.0, z: 0.07, y: -0.03, ads: [0, -0.176, -0.42] },
   marksman: { scale: 1.0, z: -0.05, y: 0.01 },// long — pushed out front
   legendary: { scale: 1.0, z: 0, y: 0 },      // the ZX-0 Prototype
   // Seasonal weapons: longer bodies are pushed further out so the muzzle clears frame.

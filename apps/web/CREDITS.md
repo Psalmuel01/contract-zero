@@ -5,7 +5,7 @@ Every file the web app ships under `public/`, where it came from, and its licenc
 ## Textures
 
 - **Zone PBR textures** (`public/textures/dustline/`): [Poly Haven](https://polyhaven.com), **CC0**. Per-map sources are in that folder's README.
-- **Hangar PBR textures** (`public/textures/hangar/`): `concrete_floor_worn_001`, `corrugated_iron_02` and `metal_plate` from [Poly Haven](https://polyhaven.com), **CC0**.
+- **Hangar PBR textures** (`public/textures/hangar/`): `concrete_floor_worn_001`, `corrugated_iron_02`, `metal_plate` and `asphalt_02` (Rob Tuytel; roads) from [Poly Haven](https://polyhaven.com), **CC0**.
 - **Impact VFX sprites** (`public/textures/vfx/`): [Kenney Particle Pack](https://kenney.nl/assets/particle-pack), **CC0**. Sources are in that folder's README.
 
 ## Weapons

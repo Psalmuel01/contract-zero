@@ -21,7 +21,7 @@ import type { LevelDef } from '../fps/levels';
 import type { ZoneTheme } from '../fps/campaign';
 import { factionPaint as factionColor } from '@/lib/factions';
 import { paintInsignia } from '@/lib/insignia';
-import { LANDMARKS, MARKS, SIGN_WORDS, TERRAIN, airborne, groundWear, perimeterWall, type Landmark, type Mark, type Phase } from './siteLook';
+import { LANDMARKS, MARKS, SIGN_WORDS, TERRAIN, airborne, groundWear, mixHex, perimeterWall, type Landmark, type Mark, type Phase } from './siteLook';
 import { bannerTexture, hazardTexture, insigniaTexture, puffTexture, rng, stencilTexture, wearTexture } from './siteTextures';
 
 // ── Sky ─────────────────────────────────────────────────────────────────────
@@ -114,7 +114,11 @@ function profile(shape: 'mesa' | 'ridge' | 'flats', a: number, seed: number): nu
 }
 
 export function SiteTerrain({ level, phase, theme, center, minimal = false }: { level: LevelDef; phase: Phase; theme: ZoneTheme; center: [number, number]; minimal?: boolean }) {
-  const apron = useMemo(() => buildTerrainApron(level, minimal), [level, minimal]);
+  // The floor tint multiplies a dark ground texture; as a plain colour it read as a pale,
+  // nearly white band between the yard and the hills. Taken down to about the
+  // texture's own brightness first, then into the haze.
+  const groundColor = useMemo(() => mixHex(mixHex(theme.floorTint, '#000000', 0.5), theme.fog[0], 0.3), [theme.floorTint, theme.fog]);
+  const apron = useMemo(() => buildTerrainApron(level, minimal, groundColor), [level, minimal, groundColor]);
   useEffect(() => () => apron.dispose(), [apron]);
   const t = TERRAIN[level.id];
   const geo = useMemo(() => {

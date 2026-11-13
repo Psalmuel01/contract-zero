@@ -18,9 +18,13 @@ const VIEWS = [
   ['entry-back', 'entry', Math.PI, 0.04],
   ['push', 'push', 0, 0.02],
   ['cargo-side', 'cargo', Math.PI / 2, 0.03],
+  // the ground underfoot (tiling, transitions) and the weapon against it
+  ['ground', 'start', 0.6, -0.42],
 ]
 
-const browser = await chromium.launch({ channel: 'chrome', args: ['--use-gl=angle', '--use-angle=swiftshader', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'] })
+// GPU=1 renders on this machine's GPU instead of SwiftShader (faster, closer to a player's view).
+const gl = process.env.GPU ? ['--enable-gpu-rasterization'] : ['--use-gl=angle', '--use-angle=swiftshader']
+const browser = await chromium.launch({ channel: 'chrome', args: [...gl, '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'] })
 const errors = []
 for (const site of sites) for (const phase of phases) {
   const page = await browser.newPage({ viewport: { width: W, height: H } })
@@ -41,7 +45,9 @@ for (const site of sites) for (const phase of phases) {
     return { start: [p.x, p.z], objectives: o.map((x) => x.pos).filter(Boolean) }
   })
   const named = { start: pts.start, entry: pts.objectives[0] ?? pts.start, push: pts.objectives[2] ?? pts.objectives[1] ?? pts.start, cargo: pts.objectives[pts.objectives.length - 2] ?? pts.start }
-  for (const [name, key, yaw, pitch] of VIEWS) {
+  // VIEWS=start,ground limits the run to those views (quicker iteration).
+  const only = process.env.VIEWS?.split(',')
+  for (const [name, key, yaw, pitch] of VIEWS.filter(([n]) => !only || only.includes(n))) {
     const [x, z] = named[key]
     await page.evaluate(([x, z, y, p]) => { window.__czWarp(x, z); window.__czLook(y, p) }, [x, z, yaw, pitch])
     await page.waitForTimeout(Number(process.env.SETTLE ?? 3500))
