@@ -39,7 +39,10 @@ pub fn is_production() -> bool {
 /// Whether a browser origin may make credentialed requests. Development also allows
 /// localhost and 127.0.0.1 on any port; production allows only the listed origins.
 pub fn origin_allowed(origin: &str, listed: &[String], production: bool) -> bool {
-    if listed.iter().any(|o| o == origin) {
+    // An origin has no path, so a trailing slash in FRONTEND_ORIGIN ("https://x.app/",
+    // as copied from a browser bar) is not part of it. Compared literally, it refused
+    // every request from the real site.
+    if listed.iter().any(|o| o.trim_end_matches('/') == origin) {
         return true;
     }
     !production && (origin.starts_with("http://localhost:") || origin.starts_with("https://localhost:") || origin.starts_with("http://127.0.0.1:"))
@@ -63,6 +66,10 @@ mod origin_tests {
         assert!(!origin_allowed("http://127.0.0.1:3000", &listed, true));
         assert!(!origin_allowed("https://evil.example", &listed, true));
         assert!(!origin_allowed("https://contract-zero.vercel.app.evil.example", &listed, true));
+        // A trailing slash in the setting still matches the browser's origin, and only it.
+        let slashed = vec!["https://contract-zero.vercel.app/".to_string()];
+        assert!(origin_allowed("https://contract-zero.vercel.app", &slashed, true));
+        assert!(!origin_allowed("https://contract-zero.vercel.app.evil.example", &slashed, true));
     }
 
     #[test]
