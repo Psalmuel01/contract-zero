@@ -99,6 +99,9 @@ pub fn network(rpc_url: &str) -> Result<NetworkConfig, String> {
     Ok(NetworkConfig { rpc_endpoints: vec![ep], ..NetworkConfig::testnet() })
 }
 
+/// The longest one signed call may take, retries included.
+const SEND_TIMEOUT_SECS: u64 = 240;
+
 pub fn explorer_tx(hash: &str) -> String {
     format!("https://testnet.nearblocks.io/txns/{hash}")
 }
@@ -153,7 +156,7 @@ impl NearClient {
         }
         let rpc_url = std::env::var("NEAR_RPC_URL").unwrap_or_else(|_| "https://rpc.testnet.fastnear.com".into());
         let network = network(&rpc_url)?;
-        Ok(Some(Self { contract, assets, rpc_url, network, accounts, signers, http: reqwest::Client::new(), locks }))
+        Ok(Some(Self { contract, assets, rpc_url, network, accounts, signers, http: super::bounded_http(10, 30), locks }))
     }
 
     pub fn account(&self, role: Role) -> &AccountId {
@@ -175,8 +178,13 @@ impl NearClient {
             .gas(NearGas::from_tgas(gas_for(method)))
             .deposit(NearToken::from_yoctonear(deposit_yocto))
             .with_signer(signer_id.clone(), self.signers[&role].clone())
-            .send_to(&self.network)
+            .send_to(&self.network);
+        // Bounded: eight retries with backoff fit well inside this, and a send that is
+        // still waiting after it is reported as an UNKNOWN outcome (not a failure), so
+        // the worker checks the chain for it before ever resending.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(SEND_TIMEOUT_SECS), result)
             .await
+            .map_err(|_| format!("{method}: send timed out after {SEND_TIMEOUT_SECS}s; outcome unknown"))?
             .map_err(|e| format!("{method}: send failed: {e}"))?;
         let full = result.into_full().ok_or_else(|| format!("{method}: transaction still pending"))?;
         let hash = full

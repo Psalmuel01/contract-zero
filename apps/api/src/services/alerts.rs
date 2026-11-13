@@ -17,7 +17,7 @@ pub async fn slack_alert(text: &str) {
 
     let text = text.to_string();
     tokio::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = super::bounded_http(5, 10);
         let result = client
             .post(&webhook_url)
             .json(&serde_json::json!({ "text": text }))

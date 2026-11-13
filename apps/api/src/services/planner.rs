@@ -42,7 +42,7 @@ impl Planner {
     pub fn from_env() -> Option<Self> {
         let key = std::env::var("NEAR_AI_API_KEY").ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())?;
         Some(Self {
-            http: reqwest::Client::new(),
+            http: super::bounded_http(10, 120), // each call also sets its own, shorter limit
             base: std::env::var("NEAR_AI_BASE").unwrap_or_else(|_| "https://cloud-api.near.ai/v1".into()),
             key,
             model: std::env::var("NEAR_AI_MODEL").unwrap_or_else(|_| "anthropic/claude-haiku-5-5".into()),

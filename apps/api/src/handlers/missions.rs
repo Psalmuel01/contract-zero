@@ -592,11 +592,21 @@ pub async fn expire_stale_sessions(state: &AppState) -> Result<usize, WorldError
         .await
 }
 
+fn busy(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::PoolTimedOut) || e.as_database_error().and_then(|d| d.code()).as_deref() == Some("55P03")
+}
+
 pub(crate) fn respond(res: Result<Value, WorldError>) -> HttpResponse {
     match res {
         Ok(v) => HttpResponse::Ok().json(v),
         Err(WorldError::Econ(e)) => HttpResponse::Conflict().json(json!({ "error": e.to_string(), "detail": e })),
         Err(WorldError::Other(m)) => HttpResponse::BadRequest().json(json!({ "error": m })),
+        // A lock wait that hit SESSION_LOCK_TIMEOUT (55P03) or a pool with no free
+        // connection: the operation is intact and safe to retry, so say "busy", not 500.
+        Err(WorldError::Db(e)) if busy(&e) => {
+            tracing::warn!("mission busy, client told to retry: {e}");
+            HttpResponse::ServiceUnavailable().insert_header(("Retry-After", "2")).json(json!({ "error": "busy, retry in a moment" }))
+        }
         Err(WorldError::Db(e)) => {
             tracing::error!("mission storage error: {e}");
             HttpResponse::InternalServerError().json(json!({ "error": "storage error" }))

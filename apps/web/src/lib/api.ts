@@ -268,6 +268,33 @@ export interface QuoteState {
   explorer: string[]
 }
 
+/**
+ * For calls the API makes idempotent (a mission's completion replays its stored
+ * result): retry while the server says it's busy (503, honouring Retry-After) or the
+ * connection drops, instead of leaving the player on a stuck end-of-mission screen.
+ */
+export async function reqRetrying<T>(path: string, init?: RequestInit, attempts = 5): Promise<T> {
+  let wait = 1000
+  for (let i = 1; ; i++) {
+    let r: Response
+    try {
+      r = await fetch(`${API}${path}`, { credentials: 'include', ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } })
+    } catch (e) {
+      if (i >= attempts) throw e
+      await new Promise((res) => setTimeout(res, wait)); wait = Math.min(wait * 2, 8000)
+      continue
+    }
+    const body = await r.json().catch(() => ({}))
+    if (r.ok) return body as T
+    if (r.status === 503 && i < attempts) {
+      const after = Number(r.headers.get('retry-after'))
+      await new Promise((res) => setTimeout(res, Number.isFinite(after) && after > 0 ? after * 1000 : wait)); wait = Math.min(wait * 2, 8000)
+      continue
+    }
+    throw new Error((body as { error?: string }).error ?? `HTTP ${r.status}`)
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`${API}${path}`, { credentials: 'include', ...init, headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) } });
   const body = await r.json().catch(() => ({}));
@@ -391,7 +418,7 @@ export const api = {
   aftermath: (session: string) => req<Aftermath>(`/missions/${session}/aftermath`),
   settlement: (opId: string) => req<SettlementView>(`/settlements/${encodeURIComponent(opId)}`),
   completeMission: (session: string, outcome: 'extracted' | 'killed', kills: number, record?: FieldRecord) =>
-    req<{ replayed: boolean; result: MissionResult }>(`/missions/${session}/complete`, { method: 'POST', body: JSON.stringify({ outcome, kills, record }) }),
+    reqRetrying<{ replayed: boolean; result: MissionResult }>(`/missions/${session}/complete`, { method: 'POST', body: JSON.stringify({ outcome, kills, record }) }),
   /** The live mission event stream (services/protocol.rs on the server). */
   missionEvents: (session: string, events: unknown[]) =>
     req<FieldVerdicts>(`/missions/${session}/events`, { method: 'POST', body: JSON.stringify({ events }) }),

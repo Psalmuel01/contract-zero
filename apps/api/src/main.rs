@@ -54,6 +54,15 @@ pub fn origin_allowed(origin: &str, listed: &[String], production: bool) -> bool
 /// to start instead of forking the world.
 pub const WORLD_WRITER_LOCK: i64 = 0x0C2E_0001;
 
+/// How often the instance confirms it still holds the world lock.
+const WRITER_CHECK_SECS: u64 = 10;
+
+/// Losing the world lock means another instance may already be writing: stop now.
+fn fatal_writer(why: &str) -> ! {
+    tracing::error!("{why}; exiting so a clean instance can take over (never two writers)");
+    std::process::exit(70);
+}
+
 #[cfg(test)]
 mod origin_tests {
     use super::origin_allowed;
@@ -163,7 +172,30 @@ async fn main() -> anyhow::Result<()> {
         let _ = serving.await;
         tracing::info!("world lock acquired after {}s; starting", started.elapsed().as_secs());
     }
-    let _writer_lock = writer; // dropped (and the lock released) only when the process exits
+    // The lock lives on this one connection. If the connection drops (a network blip, a
+    // database or pooler restart), Postgres releases the lock while this process would
+    // carry on as if it still owned the world, and a release standing by could take it:
+    // two writers. So check it on the same connection; on any doubt, exit and let the
+    // platform restart this instance cleanly.
+    tokio::spawn(async move {
+        let mut writer = writer;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(WRITER_CHECK_SECS)).await;
+            let held = tokio::time::timeout(
+                std::time::Duration::from_secs(WRITER_CHECK_SECS),
+                sqlx::query_as::<_, (bool,)>("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted AND ((classid::bigint << 32) | objid::bigint) = $1)")
+                    .bind(WORLD_WRITER_LOCK)
+                    .fetch_one(&mut writer),
+            )
+            .await;
+            match held {
+                Ok(Ok((true,))) => {}
+                Ok(Ok((false,))) => fatal_writer("the world lock is no longer held by this instance"),
+                Ok(Err(e)) => fatal_writer(&format!("the connection holding the world lock failed: {e}")),
+                Err(_) => fatal_writer("the connection holding the world lock stopped answering"),
+            }
+        }
+    });
 
     let production = is_production();
     if production && std::env::var("FRONTEND_ORIGIN").unwrap_or_default().trim().is_empty() {

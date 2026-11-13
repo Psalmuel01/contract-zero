@@ -172,7 +172,7 @@ impl AuthService {
         };
         Ok(Self {
             rpc_url,
-            http: reqwest::Client::new(),
+            http: super::bounded_http(10, 20),
             near_auth: NearAuthConfig::from_env(),
             recipient: std::env::var("AUTH_RECIPIENT").unwrap_or_else(|_| "contract-zero".into()),
             relayer,
