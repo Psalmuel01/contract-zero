@@ -8,6 +8,11 @@ mod handlers;
 mod migrate;
 mod services;
 
+/// BIND_ADDR, else the platform's PORT (Railway, Render, Fly), else 8080.
+fn bind_addr() -> String {
+    std::env::var("BIND_ADDR").unwrap_or_else(|_| format!("0.0.0.0:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into())))
+}
+
 #[derive(Clone)]
 pub struct AppState {
     /// NEAR settlement client (None = off-chain only).
@@ -116,7 +121,40 @@ async fn main() -> anyhow::Result<()> {
     let mut writer = db.acquire().await?.detach();
     let (locked,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)").bind(WORLD_WRITER_LOCK).fetch_one(&mut writer).await?;
     if !locked {
-        anyhow::bail!("another API instance already owns the world on this database (advisory lock {WORLD_WRITER_LOCK:#x}); run one writer per database");
+        // Another instance owns the world. On a platform deploy that is the previous
+        // release, still serving until this one reports healthy; exiting here meant no
+        // release could ever replace it. So stand by: answer /health (and nothing else)
+        // until the old instance stops and its session, and with it the lock, goes away.
+        // A second instance started by mistake just waits here, never writing.
+        tracing::warn!("another API instance owns the world (advisory lock {WORLD_WRITER_LOCK:#x}); standing by until it releases");
+        let standby = HttpServer::new(|| {
+            App::new()
+                .route("/health", web::get().to(|| async { actix_web::HttpResponse::Ok().body("standby") }))
+                .default_service(web::to(|| async {
+                    actix_web::HttpResponse::ServiceUnavailable()
+                        .insert_header(("Retry-After", "5"))
+                        .json(serde_json::json!({ "error": "the API is handing over to a new release; retry in a few seconds" }))
+                }))
+        })
+        .workers(1)
+        .bind(bind_addr())?
+        .run();
+        let handle = standby.handle();
+        let serving = tokio::spawn(standby);
+        let started = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let (got,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)").bind(WORLD_WRITER_LOCK).fetch_one(&mut writer).await?;
+            if got {
+                break;
+            }
+            if started.elapsed().as_secs() % 60 < 2 {
+                tracing::info!("still standing by for the world lock ({}s)", started.elapsed().as_secs());
+            }
+        }
+        handle.stop(true).await;
+        let _ = serving.await;
+        tracing::info!("world lock acquired after {}s; starting", started.elapsed().as_secs());
     }
     let _writer_lock = writer; // dropped (and the lock released) only when the process exits
 
@@ -166,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
         .collect();
 
     // BIND_ADDR, else the platform's PORT (Railway, Render, Fly), else 8080.
-    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| format!("0.0.0.0:{}", std::env::var("PORT").unwrap_or_else(|_| "8080".into())));
+    let bind_addr = bind_addr();
     tracing::info!("Starting CONTRACT ZERO API on {}", bind_addr);
 
     HttpServer::new(move || {
