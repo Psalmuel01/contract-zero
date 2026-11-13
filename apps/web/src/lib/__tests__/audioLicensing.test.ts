@@ -37,11 +37,16 @@ describe('audio licensing', () => {
     for (const f of shipped.filter((x) => x.startsWith('sounds/fps/'))) expect(gen, f).toContain(f.split('/').pop()!.replace('.mp3', ''))
   })
 
-  it('no recorded voice or music ships (all of it is synthesised, and CREDITS says so)', () => {
-    expect(existsSync(join(PUBLIC, 'vo'))).toBe(false)
+  it('voice is synthesised by the declared pipeline only, and no music ships', () => {
     expect(existsSync(join(PUBLIC, 'music'))).toBe(false)
-    expect(credits).toMatch(/ships no recorded voice/i)
-    expect(shipped.every((f) => f.startsWith('sounds/fps/'))).toBe(true)
+    expect(credits).toMatch(/Kokoro-82M.*Apache-2\.0/)
+    expect(credits).toContain('apps/tts/pregen.py')
+    const manifest = JSON.parse(readFileSync(join(PUBLIC, 'vo/manifest.json'), 'utf8')) as Record<string, { speaker: string; text: string }>
+    const voiced = shipped.filter((f) => f.startsWith('vo/'))
+    // Every voice file is one the pipeline made (in its manifest), and every manifest entry ships.
+    for (const f of voiced) expect(Object.keys(manifest), f).toContain(f.slice(3).replace(/\.mp3$/, ''))
+    expect(voiced.length).toBe(Object.keys(manifest).length)
+    expect(shipped.every((f) => f.startsWith('sounds/fps/') || f.startsWith('vo/'))).toBe(true)
   })
 
   it('the source never loads audio from an outside host', () => {

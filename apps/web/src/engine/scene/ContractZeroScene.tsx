@@ -3642,7 +3642,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     if (!audio.isUnlocked()) return;
     if (voQueue.current.length && now >= voUntil.current) {
       const line = voQueue.current.shift()!;
-      audio.vo(line.id, line.speaker);
+      audio.vo(line.id, line.speaker, undefined, line.audio);
       const meta = SPEAKER_META[line.speaker];
       const subs = settingsRef?.current.subtitles;
       if (h.subName) { h.subName.textContent = meta.name; h.subName.style.color = subs?.speakerColors === false ? '#e9edf2' : meta.color; }

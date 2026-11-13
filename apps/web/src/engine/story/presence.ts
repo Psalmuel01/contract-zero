@@ -29,6 +29,9 @@ export interface PresenceLine {
   speaker: Speaker;
   text: string;
   trigger: PresenceTrigger;
+  /** Where this line's voice comes from when it isn't one of the pre-voiced authored
+   *  lines (public/vo): the API's voice for a mission's own story line. */
+  audio?: string;
 }
 
 /** The beats the scene fires. */
@@ -94,7 +97,7 @@ export const PRESENCE_LINES: PresenceLine[] = [
 ];
 
 /** A mission's own lines from the server, by trigger. */
-export interface StoryLine { id: string; speaker: string; text: string }
+export interface StoryLine { id: string; speaker: string; text: string; audio?: string }
 export type MissionRadio = Partial<Record<PresenceTrigger, StoryLine[]>>;
 
 /** The full story the server briefs a contract with. */
@@ -113,12 +116,13 @@ const known = (s: string): s is Speaker => s in SPEAKER_META;
 /** Lines for a trigger: the mission's own when it has them, else the defaults. */
 export function linesFor(trigger: PresenceTrigger, radio?: MissionRadio): PresenceLine[] {
   const own = radio?.[trigger]?.filter((l) => known(l.speaker) && l.text.trim());
-  if (own?.length) return own.map((l) => ({ id: l.id, speaker: l.speaker as Speaker, text: l.text, trigger }));
+  if (own?.length) return own.map((l) => ({ id: l.id, speaker: l.speaker as Speaker, text: l.text, trigger, audio: l.audio }));
   return PRESENCE_LINES.filter((l) => l.trigger === trigger);
 }
 
 /** The line for guards that really arrived: the real count, in the handler's voice. */
 export function reinforcementLine(count: number): PresenceLine {
   const n = Math.max(1, Math.round(count));
-  return { id: 'dyn-reinforce', speaker: 'handler', trigger: 'reinforcements', text: n === 1 ? 'One more guard coming in. Finish up.' : `${n} more guards coming in. Finish up.` };
+  // Counts 1-12 are pre-voiced (apps/tts/pregen.py writes reinforce-1 … reinforce-12).
+  return { id: n <= 12 ? `reinforce-${n}` : 'dyn-reinforce', speaker: 'handler', trigger: 'reinforcements', text: n === 1 ? 'One more guard coming in. Finish up.' : `${n} more guards coming in. Finish up.` };
 }

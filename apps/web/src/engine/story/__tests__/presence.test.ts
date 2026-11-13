@@ -1,9 +1,12 @@
+import VO_MANIFEST_RAW from '../../../../public/vo/manifest.json';
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { PRESENCE_LINES, SPEAKER_META, linesFor, reinforcementLine, type PresenceTrigger } from '../presence';
 
 const SCENE = readFileSync(resolve(__dirname, '../../scene/ContractZeroScene.tsx'), 'utf8');
+
+const VO_MANIFEST = VO_MANIFEST_RAW as Record<string, { text: string }>;
 
 describe('presence lines', () => {
   it('gives every line a unique id (ids become VO filenames)', () => {
@@ -71,7 +74,12 @@ describe('radio from real state', () => {
     expect(reinforcementLine(1).text).toBe('One more guard coming in. Finish up.');
     expect(reinforcementLine(3).text).toBe('3 more guards coming in. Finish up.');
     expect(reinforcementLine(0).text).toContain('One more');   // never "0 more": it is only said when guards arrived
-    expect(reinforcementLine(2).id.startsWith('dyn-')).toBe(true); // played as radio, never looked up as a recording
+    // Counts 1-12 are pre-voiced under their own id, so the voice says the same number
+    // as the subtitle; beyond that the line plays as its subtitle.
+    expect(reinforcementLine(2).id).toBe('reinforce-2');
+    expect(reinforcementLine(12).id).toBe('reinforce-12');
+    expect(reinforcementLine(13).id).toBe('dyn-reinforce');
+    for (let n = 1; n <= 12; n++) expect(VO_MANIFEST[reinforcementLine(n).id]?.text, `reinforce-${n}`).toBe(reinforcementLine(n).text);
   });
   it('the scene says each from the state that makes it true', () => {
     expect(SCENE).toMatch(/sayAgain\('lowAmmo'/);

@@ -494,7 +494,8 @@ pub async fn story(state: web::Data<AppState>, req: HttpRequest, path: web::Path
     let (Ok(mut tale), Ok(facts)) = (serde_json::from_value::<story::Story>(stored["story"].clone()), serde_json::from_value::<story::Facts>(stored["facts"].clone())) else {
         return HttpResponse::InternalServerError().json(json!({ "error": "story unreadable" }));
     };
-    if stored["voiced"] != true {
+    let first = stored["voiced"] != true;
+    if first {
         if let Some(planner) = crate::services::planner::Planner::from_env() {
             let call = story::rewrite(&planner, &mut tale, &facts).await;
             if call["ok"] == true {
@@ -509,7 +510,45 @@ pub async fn story(state: web::Data<AppState>, req: HttpRequest, path: web::Path
                 .bind(session).bind(json!({ "facts": facts, "story": tale, "voiced": true })).execute(db).await;
         }
     }
+    if first {
+        // Voice this mission's lines now, in the order they'll be heard, so most are
+        // ready (cached) before the run reaches them.
+        if let (Some(v), Ok(t)) = (state.voice.as_ref(), serde_json::to_value(&tale)) {
+            v.warm(db.clone(), crate::services::voice::story_lines(&t).into_iter().map(|(_, s, x)| (s, x)).collect());
+        }
+    }
     HttpResponse::Ok().json(json!({ "story": tale, "facts": facts }))
+}
+
+/// `GET /missions/{session}/vo/{line}`: one line of this player's mission story, voiced.
+/// Only a line the server stored for that session; never text from the request.
+pub async fn line_voice(state: web::Data<AppState>, req: HttpRequest, path: web::Path<(Uuid, String)>) -> HttpResponse {
+    let who = match crate::handlers::auth::player(&state, &req).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(voice) = state.voice.as_ref() else { return HttpResponse::NotFound().finish() };
+    let (session, line) = path.into_inner();
+    let db = state.world.db();
+    let row: Option<(String, Option<Value>)> = sqlx::query_as("SELECT player, story FROM mission_sessions WHERE id = $1").bind(session).fetch_optional(db).await.unwrap_or(None);
+    let Some((player, Some(stored))) = row else { return HttpResponse::NotFound().finish() };
+    if player != who.account {
+        return HttpResponse::Forbidden().finish();
+    }
+    let Some((_, speaker, text)) = crate::services::voice::story_lines(&stored["story"]).into_iter().find(|(id, _, _)| *id == line) else {
+        return HttpResponse::NotFound().finish();
+    };
+    voice_response(voice.audio(db, &speaker, &text).await)
+}
+
+pub(crate) fn voice_response(r: Result<Vec<u8>, String>) -> HttpResponse {
+    match r {
+        Ok(audio) => HttpResponse::Ok().content_type("audio/mpeg").insert_header(("Cache-Control", "private, max-age=86400")).body(audio),
+        Err(e) => {
+            tracing::warn!("voice: {e}; the client keeps the subtitle");
+            HttpResponse::NotFound().finish()
+        }
+    }
 }
 
 /// What the target faction decided after the operation settled: its own logged agent

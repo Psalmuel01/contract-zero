@@ -32,7 +32,10 @@ for (const s of sites) {
   const scape = [loud(wav, 1, 3), loud(wav, 4, 3), loud(wav, 7, 3)].sort((x, y) => x.I - y.I)[0], fight = loud(wav, 10.5, 3), fight2 = loud(wav, 18, 4)
   const ext1 = loud(wav, 22.5, 3), ext2 = loud(wav, 29, 3)
   const voice = band(wav, 14.3, 3, 'highpass=f=500,lowpass=f=2500'), noVoice = band(wav, 18.3, 3, 'highpass=f=500,lowpass=f=2500')
-  air[s] = [band(wav, 1, 9, 'highpass=f=800,lowpass=f=3000'), band(wav, 1, 9, 'highpass=f=3000')]
+  // A site's character, not its events: the median over nine 1 s windows. One 9 s
+  // window swung up to 5 dB between takes of the same site (a passing event or not).
+  const steady = (filt) => { const v = Array.from({ length: 9 }, (_, i) => band(wav, 1 + i, 1, filt)).filter(Number.isFinite).sort((a, b) => a - b); return v[Math.floor(v.length / 2)] }
+  air[s] = [steady('highpass=f=800,lowpass=f=3000'), steady('highpass=f=3000')]
   console.log(`${s}: soundscape ${scape.I} LUFS · fight ${fight2.I} LUFS (peak ${Math.max(fight.P, fight2.P)} dBFS) · voice band with radio ${voice.toFixed(1)} vs without ${noVoice.toFixed(1)} dB · extraction ${ext1.I} -> ${ext2.I} LUFS · air 0.8-3k ${air[s][0].toFixed(1)} dB, >3k ${air[s][1].toFixed(1)} dB`)
   check(fight2.I >= -21 && fight2.I <= -13, `${s}: a firefight sits at ${fight2.I} LUFS (target -21 to -13)`)
   check(Math.max(fight.P, fight2.P) <= -0.5, `${s}: firefight true peak ${Math.max(fight.P, fight2.P)} dBFS (target at or under -0.5)`)

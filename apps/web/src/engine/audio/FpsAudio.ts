@@ -40,6 +40,32 @@ type Ctx = AudioContext;
 // scripts/generate-sfx.mjs (see CREDITS.md), not recordings. The runtime synth read
 // like a punch, so the gun plays these buffers. One is picked at random per shot
 // with a little pitch wobble so rapid fire isn't a copy-paste.
+import voManifest from '../../../public/vo/manifest.json';
+
+/** Authored lines voiced in advance (apps/tts/pregen.py), by id. */
+const PREVOICED = new Set(Object.keys(voManifest));
+/** A voice not ready by now plays as its subtitle: later, it would trail the caption. */
+const VO_DEADLINE_MS = 3500;
+/** Per-speaker voice level into the voice bus (before the mix's own voice slider). */
+// Measured over a firefight: at 1.0 a line lifted the voice band only 1.5 dB.
+const VO_LEVEL: Record<Speaker, number> = { handler: 1.6, halcyon: 1.5, vanguard: 1.6, vex: 1.5, ashen: 1.45 };
+
+/** Linear to 0.8 (about -2 dBFS), then a smooth knee that approaches 0.93 (-0.6 dBFS). */
+function softCeiling(n = 4096): Float32Array<ArrayBuffer> {
+  const c = new Float32Array(n);
+  const knee = 0.8, top = 0.93, room = top - knee;
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1, a = Math.abs(x);
+    const y = a <= knee ? a : knee + room * Math.tanh((a - knee) / room);
+    c[i] = Math.sign(x) * y;
+  }
+  return c;
+}
+
+/** Headroom under the player's master slider: with the fight's presence restored, the
+ *  untrimmed master left an occasional true-peak over (0 dBFS in 1 of 3 takes). */
+const MASTER_TRIM = 0.91;
+
 const SAMPLE_BASE = '/sounds/fps/';
 const RIFLE_FILES = ['rifle_1.mp3', 'rifle_2.mp3', 'rifle_3.mp3'];
 const WALL_FILE = 'impact_wall.mp3';
@@ -107,6 +133,7 @@ export class FpsAudio {
   private ctx: Ctx | null = null;
   private master!: GainNode;
   private limiter!: DynamicsCompressorNode;
+  private ceiling!: WaveShaperNode;
   private gunBus!: GainNode;
   private impactBus!: GainNode;
   private uiBus!: GainNode;
@@ -197,10 +224,18 @@ export class FpsAudio {
       this.limiter.ratio.value = 12;
       this.limiter.attack.value = 0.001;   // gunshot transients slipped through 3 ms and peaked over 0 dBFS
       this.limiter.release.value = 0.18;
-      this.limiter.connect(ctx.destination);
+      // The last stage: a soft ceiling. The limiter's attack still lets the fastest
+      // gunshot transients through (a -0.3 dBFS true peak in one take); this is linear
+      // below about -2 dBFS and rounds anything above it toward -0.6 dBFS, so the mix can
+      // never clip whatever lands at once.
+      this.ceiling = ctx.createWaveShaper();
+      this.ceiling.curve = softCeiling();
+      this.ceiling.oversample = '4x';
+      this.limiter.connect(this.ceiling);
+      this.ceiling.connect(ctx.destination);
 
       this.master = ctx.createGain();
-      this.master.gain.value = 0.9;
+      this.master.gain.value = 0.9 * MASTER_TRIM;
       this.master.connect(this.limiter);
 
       this.gunBus = ctx.createGain();
@@ -228,10 +263,20 @@ export class FpsAudio {
       this.combatEq = ctx.createBiquadFilter();
       this.combatEq.type = 'lowshelf'; this.combatEq.frequency.value = 160; this.combatEq.gain.value = -9;
       const combatHp = ctx.createBiquadFilter(); combatHp.type = 'highpass'; combatHp.frequency.value = 32;
-      this.combatDuck.connect(this.combatEq).connect(combatHp).connect(this.master);
+      // Measured (octave bands of the final mix): the fight sat ~5 dB heavy at 63-125 Hz
+      // and fell away above 4 kHz, which reads as muffled. Take the boom down a little
+      // more and give the crack its presence and air back.
+      const combatBoom = ctx.createBiquadFilter(); combatBoom.type = 'peaking'; combatBoom.frequency.value = 90; combatBoom.Q.value = 1; combatBoom.gain.value = -3;
+      const combatPresence = ctx.createBiquadFilter(); combatPresence.type = 'peaking'; combatPresence.frequency.value = 3000; combatPresence.Q.value = 0.8; combatPresence.gain.value = 3;
+      const combatAir = ctx.createBiquadFilter(); combatAir.type = 'highshelf'; combatAir.frequency.value = 7000; combatAir.gain.value = 3;
+      this.combatDuck.connect(this.combatEq).connect(combatHp).connect(combatBoom).connect(combatPresence).connect(combatAir).connect(this.master);
       this.envBus = ctx.createGain();
       this.envBus.gain.value = this.mix.ambience;
-      this.ambBus.connect(this.ambDuck); this.envBus.connect(this.ambDuck); this.ambDuck.connect(this.master);
+      // The site's air: the beds and layers are low-passed for distance and walls, and
+      // the whole environment fell 12-20 dB per three octaves above 500 Hz. A shelf
+      // brings the wind, hiss and machinery's top back without touching their level.
+      const envAir = ctx.createBiquadFilter(); envAir.type = 'highshelf'; envAir.frequency.value = 3500; envAir.gain.value = 6;
+      this.ambBus.connect(this.ambDuck); this.envBus.connect(this.ambDuck); this.ambDuck.connect(envAir).connect(this.master);
       this.musicBus.connect(this.musicDuck); this.musicDuck.connect(this.master);
       this.interactBus.connect(this.interactDuck); this.interactDuck.connect(this.master);
       this.uiBus.connect(this.master);
@@ -818,30 +863,72 @@ export class FpsAudio {
   }
 
   /**
-   * A presence line (slice 6). Plays the per-speaker radio signature, ducks the
-   * room (a voice owns it), then prefers the recorded /vo/{id}.mp3 — the lines
-   * without a recording land on the signature + subtitle alone, exactly as the
-   * story system was designed to degrade.
+   * A presence line. The per-speaker radio signature and the duck first (a voice owns
+   * the channel), then the voice itself:
+   *  - an authored line is pre-voiced in public/vo (apps/tts/pregen.py);
+   *  - a mission's own line carries `url`, the API's voice for it (synthesized once,
+   *    cached, only for lines the server stored);
+   *  - otherwise, or if the voice isn't ready within VO_DEADLINE_MS (a late voice would
+   *    land out of step with its subtitle), the line plays as its subtitle over the
+   *    channel's own sound.
+   * Voices are decoded into the graph, through a radio band and the voice bus, so they
+   * follow the mix, the ducking and the recording tap like everything else.
    */
-  vo(id: string, speaker: Speaker, seconds = 2.6): void {
-    // The static + duck need the WebAudio graph, but the recording does not —
-    // never let a missing context swallow a line.
+  vo(id: string, speaker: Speaker, seconds = 2.6, url?: string): void {
     const dur = Math.max(1.2, Math.min(7, seconds));
     if (this.ctx) {
       this.radioSignature(speaker);
       this.radioDuck(dur + 0.3);
     }
-    // No recording (a contract's own lines never have one): the channel still carries
-    // a voice for the length of the line, so the radio sounds like someone talking
-    // while the subtitle says what. No invented words: the murmur is unintelligible.
-    if (id.startsWith('dyn-')) { this.radioMurmur(speaker, dur); return; }
-    const known = this.voAvailable.get(id);
-    if (known === false) { this.radioMurmur(speaker, dur); return; }
-    if (known === true) { this.playVoFile(id); return; }
-    // HEAD first: a 404 here is quiet, an <audio> 404 spams the console.
-    fetch(`/vo/${id}.mp3`, { method: 'HEAD' })
-      .then((r) => { this.voAvailable.set(id, r.ok); if (r.ok) this.playVoFile(id); else this.radioMurmur(speaker, dur); })
-      .catch(() => { this.voAvailable.set(id, false); this.radioMurmur(speaker, dur); });
+    const src = url ?? (PREVOICED.has(id) ? `/vo/${id}.mp3` : null);
+    const ctx = this.ctx;
+    if (!src || !ctx) { this.radioMurmur(speaker, dur); return; }
+    const ready = this.voBuffers.get(src);
+    if (ready) { this.playVoBuffer(id, ready, speaker); return; }
+    let settled = false;
+    const fallback = () => { if (!settled) { settled = true; this.radioMurmur(speaker, dur); } };
+    const timer = setTimeout(fallback, VO_DEADLINE_MS);
+    fetch(src, { credentials: url ? 'include' : 'same-origin' })
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`voice ${r.status}`))))
+      .then((b) => ctx.decodeAudioData(b))
+      .then((buf) => {
+        this.voBuffers.set(src, buf);
+        if (!settled) { settled = true; clearTimeout(timer); this.playVoBuffer(id, buf, speaker); }
+      })
+      .catch(() => { clearTimeout(timer); fallback(); });
+  }
+
+  /** Warm a line's voice ahead of its beat (the deploy screen does this for a mission). */
+  prefetchVo(url: string): void {
+    const ctx = this.ctx;
+    if (!ctx || this.voBuffers.has(url)) return;
+    fetch(url, { credentials: 'include' })
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`voice ${r.status}`))))
+      .then((b) => ctx.decodeAudioData(b))
+      .then((buf) => { this.voBuffers.set(url, buf); })
+      .catch(() => {});
+  }
+
+  /** A decoded voice through a radio band (Ashen's set overdriven) into the voice bus. */
+  private playVoBuffer(id: string, buf: AudioBuffer, speaker: Speaker): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    this.voDurations.set(id, buf.duration);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 260; hp.Q.value = 0.7;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = speaker === 'halcyon' ? 4200 : 3600; lp.Q.value = 0.7;
+    // Presence: speech intelligibility lives at 1.5-4 kHz.
+    const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 2400; pres.Q.value = 0.9; pres.gain.value = 4;
+    const g = ctx.createGain(); g.gain.value = VO_LEVEL[speaker];
+    let chain: AudioNode = src;
+    chain = chain.connect(hp).connect(pres).connect(lp);
+    if (speaker === 'ashen') {
+      const drive = ctx.createWaveShaper(); drive.curve = driveCurve(2.2); drive.oversample = '2x';
+      chain = chain.connect(drive);
+    }
+    chain.connect(g).connect(this.voiceBus ?? this.uiBus);
+    src.start();
   }
 
   /**
@@ -924,7 +1011,8 @@ export class FpsAudio {
       if (lfoHz) { const l = ctx.createOscillator(); l.frequency.value = lfoHz; const d = ctx.createGain(); d.gain.value = lfoDepth; l.connect(d).connect(g.gain); l.start(); nodes.push(l) }
     };
     const hum = (freq: number, vol: number) => { const o = ctx.createOscillator(); o.frequency.value = freq; const g = ctx.createGain(); g.gain.value = vol; o.connect(g).connect(out); o.start(); nodes.push(o) };
-    if (id === 'dustline_depot') { band(650, 0.7, 0.06, 0.07, 0.045); band(1300, 0.7, 0.05, 0.09, 0.04); band(2600, 0.8, 0.018, 0.11, 0.014); band(3600, 0.5, 0.004, 0.05, 0.003, 'highpass') }
+    // Dustline: gusting wind through the mids, little on top (it's open ground, not machinery).
+    if (id === 'dustline_depot') { band(650, 0.7, 0.06, 0.07, 0.045); band(1300, 0.7, 0.05, 0.09, 0.04); band(2600, 0.8, 0.011, 0.11, 0.009) }
     else if (id === 'blacksite') { band(3600, 0.5, 0.035); band(900, 1.2, 0.01, 0.2, 0.004); hum(120, 0.012); hum(240, 0.006) }
     else { band(420, 0.6, 0.05, 0.3, 0.012); band(4200, 0.6, 0.009, 0.15, 0.004); hum(98, 0.008) }
     this.air = { nodes, out };
@@ -943,7 +1031,7 @@ export class FpsAudio {
   captureStream(): MediaStream | null {
     const ctx = this.ctx
     if (!ctx || !this.limiter || typeof ctx.createMediaStreamDestination !== 'function') return null
-    if (!this.capture) { this.capture = ctx.createMediaStreamDestination(); this.limiter.connect(this.capture) }
+    if (!this.capture) { this.capture = ctx.createMediaStreamDestination(); (this.ceiling ?? this.limiter).connect(this.capture) }
     return this.capture.stream
   }
   private capture: MediaStreamAudioDestinationNode | null = null
@@ -958,24 +1046,12 @@ export class FpsAudio {
     return buf;
   }
 
-  private voAvailable = new Map<string, boolean>();
+  private voBuffers = new Map<string, AudioBuffer>();
   private voDurations = new Map<string, number>();
 
   /** Real length of a recorded line, once its metadata has loaded. */
   voDuration(id: string): number | undefined {
     return this.voDurations.get(id);
-  }
-
-  private playVoFile(id: string): void {
-    try {
-      const el = new Audio(`/vo/${id}.mp3`);
-      el.volume = this.backgroundMuted ? 0 : Math.min(1, 0.95 * this.mix.voice * Math.min(1, this.mix.master / 0.9));
-      // Some lines run long: hold the subtitle for the RECORDING, not a guess.
-      el.addEventListener('loadedmetadata', () => {
-        if (Number.isFinite(el.duration) && el.duration > 0) this.voDurations.set(id, el.duration);
-      });
-      void el.play().catch(() => {});
-    } catch { /* autoplay blocked */ }
   }
 
   /** Per-speaker static: you know WHO is talking before you read a word. */
@@ -1344,7 +1420,7 @@ export class FpsAudio {
     if (!ctx || !this.master) return;
     const t = ctx.currentTime;
     const set = (g: GainNode | undefined, v: number) => g?.gain.setTargetAtTime(v, t, 0.05);
-    set(this.master, this.backgroundMuted ? 0 : this.mix.master);
+    set(this.master, this.backgroundMuted ? 0 : this.mix.master * MASTER_TRIM);
     set(this.gunBus, GUN_LEVEL * this.mix.effects);
     set(this.impactBus, IMPACT_LEVEL * this.mix.effects);
     set(this.uiBus, this.mix.ui);

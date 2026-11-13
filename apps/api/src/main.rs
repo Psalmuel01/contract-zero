@@ -28,6 +28,8 @@ pub struct AppState {
     pub worker_id: String,
     /// The official NEAR Intents (1Click) adapter: read-only unless approved.
     pub intents: services::intents::IntentsClient,
+    /// Radio voices (apps/tts), when TTS_URL and TTS_TOKEN are set.
+    pub voice: Option<services::voice::VoiceService>,
 }
 
 /// `CZ_ENV=production` turns on the strict deployment rules: credentialed CORS only
@@ -226,7 +228,9 @@ async fn main() -> anyhow::Result<()> {
         auth: std::sync::Arc::new(auth),
         worker_id: format!("{}-{}-{}", std::env::var("HOSTNAME").unwrap_or_else(|_| "api".into()), std::process::id(), &uuid::Uuid::new_v4().to_string()[..8]),
         intents: services::intents::IntentsClient::from_env(),
+        voice: services::voice::VoiceService::from_env(),
     };
+    tracing::info!("voice: {}", if app_state.voice.is_some() { "radio lines are synthesized (TTS_URL)" } else { "no voice service; radio lines play as subtitles and squelch" });
 
     services::scheduler::spawn(app_state.clone());
     services::settlement::spawn_worker(app_state.clone());

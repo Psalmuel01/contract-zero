@@ -15,7 +15,7 @@ import { GUN_CATALOG, type GunId } from '@/engine/combat/GunStats'
 import type { ContractRunStats } from '@/engine/scene/ContractZeroScene'
 import { useQuery } from '@tanstack/react-query'
 import { useSession } from '@/lib/useSession'
-import { api, RESOURCE_LABEL, type OpKind, type MissionResult, type MissionStart, type ResourceName, type WorldView } from '@/lib/api'
+import { API, api, RESOURCE_LABEL, type OpKind, type MissionResult, type MissionStart, type ResourceName, type WorldView } from '@/lib/api'
 import { OperationIntel } from '@/components/world/OperationIntel'
 import { ReadinessSummary, useReadinessData } from '@/components/world/Readiness'
 import { MissionResults } from '@/components/world/MissionResults'
@@ -124,7 +124,14 @@ function Deploy() {
   const mission = useMemo(() => {
     if (phase.kind !== 'fighting') return null
     const m = buildOperationMission(phase.start.mission, gun)
-    return phase.story ? { ...m, radio: phase.story.radio } : m
+    if (!phase.story) return m
+    // Each of this mission's lines is voiced by the API (only lines it stored for this
+    // session); a line it can't voice in time plays as its subtitle.
+    const session = phase.start.session
+    const radio = Object.fromEntries(Object.entries(phase.story.radio).map(([trigger, lines]) => [
+      trigger, (lines ?? []).map((l) => ({ ...l, audio: `${API}/missions/${session}/vo/${encodeURIComponent(l.id)}` })),
+    ]))
+    return { ...m, radio }
   }, [phase, gun])
 
   if (phase.kind === 'briefing') {

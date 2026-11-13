@@ -2,7 +2,7 @@
 // capture tap, through a fixed script driven by the game's own sound functions:
 //   0-10 s   the site's soundscape alone (guards down, so nothing else sounds)
 //   10-22 s  a firefight: the player's rifle and guards' shots around the listener
-//   14 s     a radio line over the fight
+//   14 s     a radio line over the fight (a real pre-voiced line; VO_ID picks it)
 //   22-34 s  extraction: the call, the vehicle coming in, the countdown, success
 // Writes <out>/<site>.webm and <site>.json (segment marks) for ffmpeg analysis.
 //   node probe-audio-record.mjs [outDir] [site,...]
@@ -24,7 +24,7 @@ for (const site of sites) {
   await page.mouse.click(320, 180) // a gesture unlocks audio
   await page.evaluate(() => { window.__czSkipBriefing(); window.__czKillAll() })
   await page.waitForTimeout(3000)
-  const b64 = await page.evaluate(async (parts) => {
+  const b64 = await page.evaluate(async ([parts, VO_ID]) => {
     const a = window.__czAudio
     const stream = a.captureStream()
     if (!stream) return null
@@ -44,7 +44,7 @@ for (const site of sites) {
       if (parts.includes('shot') && k % 2 === 0) a.shot(profile)
       if (parts.includes('enemy') && k % 3 === 0) a.enemyShot(around(k), { impact: [p.x + 0.6, 1.4, p.z], hit: false })
       if (parts.includes('impact') && k % 7 === 0) a.impact('wall', [p.x + 1, 1.2, p.z - 2])
-      if (parts.includes('radio') && !radio && performance.now() - t0 > 4000) { a.vo('dyn-record', 'handler', 3.5); radio = true }
+      if (parts.includes('radio') && !radio && performance.now() - t0 > 4000) { a.vo(VO_ID, 'handler', 3.5); radio = true }
       k++
       await wait(130)
     }
@@ -59,7 +59,7 @@ for (const site of sites) {
     const buf = await new Blob(chunks).arrayBuffer()
     let s = ''; const u = new Uint8Array(buf); for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i])
     return btoa(s)
-  }, (process.env.FIGHT ?? 'shot,enemy,impact,radio,music').split(','))
+  }, [(process.env.FIGHT ?? 'shot,enemy,impact,radio,music').split(','), process.env.VO_ID ?? 'handler-first-contact'])
   if (b64) {
     writeFileSync(`${out}/${site}.webm`, Buffer.from(b64, 'base64'))
     writeFileSync(`${out}/${site}.json`, JSON.stringify({ segments: { soundscape: [0, 10], firefight: [10, 22], radio: [14, 17.5], extraction: [22, 34] } }))

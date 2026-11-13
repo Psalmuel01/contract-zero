@@ -1,0 +1,206 @@
+{
+ "dyn-default-boom": {
+  "speaker": "vanguard",
+  "voice": "bm_george",
+  "key": "142e876f372a3d68",
+  "text": "Fire on the line! Seal the site. Nobody leaves."
+ },
+ "dyn-default-cargo": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "4b9f56c0623ece68",
+  "text": "That's one. Carry what you can and get to the extraction zone."
+ },
+ "dyn-default-charge": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "ec5f16c9b3437053",
+  "text": "Charge set. One more, then we light it."
+ },
+ "dyn-default-exfil": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "5e25ffb144895313",
+  "text": "Extraction is inbound. Hold the zone until it lands."
+ },
+ "dyn-default-exfil-broken": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "271fddd934bba488",
+  "text": "You've left the zone. They won't wait for you. Get back in."
+ },
+ "dyn-default-exfil-done": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "26648a7ca6bef95b",
+  "text": "You're out. Nice work."
+ },
+ "handler-boss-enrage": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "763d9448026bdb72",
+  "text": "Almost done. This is when they are worst. Finish it."
+ },
+ "handler-boss-escalate": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "d6ed3dcc63944a90",
+  "text": "He's hurt and he knows it. He'll stop being careful now."
+ },
+ "handler-first-contact": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "acea35e04901c683",
+  "text": "Contact. They know you're here now. Move."
+ },
+ "handler-low-ammo": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "60c1118e85f0361c",
+  "text": "You're nearly dry. Take what the guards drop."
+ },
+ "handler-low-hp": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "362937b1d36cbaae",
+  "text": "You're hit. Get behind something. The cargo isn't going anywhere."
+ },
+ "handler-op-breach": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "d6f42aff4582d8ee",
+  "text": "You're in. Escort's awake now, so make it quick."
+ },
+ "handler-op-start": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "7a46118eac62895c",
+  "text": "Contract's live. The cargo is in the yard past the hall. Load it, walk it out, get paid."
+ },
+ "handler-push-in": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "2b40ef0e248c80d4",
+  "text": "That's the yard. Get on the cargo and start loading. They will try to take it back."
+ },
+ "handler-reinforce": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "e313ee5d69f5a3ab",
+  "text": "More guards are coming in. Finish up."
+ },
+ "handler-troops-cleared": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "24ca9bc54c41db01",
+  "text": "Forward escort is down. Someone just keyed in on the convoy channel."
+ },
+ "handler-zone-clear": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "c1b3ecfe49c2993c",
+  "text": "Hear that? They just raised the price of the next job."
+ },
+ "reinforce-1": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "968c6bada22af6fb",
+  "text": "One more guard coming in. Finish up."
+ },
+ "reinforce-10": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "a69d9821099dfc9f",
+  "text": "10 more guards coming in. Finish up."
+ },
+ "reinforce-11": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "ac0be5be1cb13832",
+  "text": "11 more guards coming in. Finish up."
+ },
+ "reinforce-12": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "069304e86caceaf2",
+  "text": "12 more guards coming in. Finish up."
+ },
+ "reinforce-2": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "a93d42e7df3d3b26",
+  "text": "2 more guards coming in. Finish up."
+ },
+ "reinforce-3": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "2c4da3fd2791586e",
+  "text": "3 more guards coming in. Finish up."
+ },
+ "reinforce-4": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "58e3eaac176a8f7a",
+  "text": "4 more guards coming in. Finish up."
+ },
+ "reinforce-5": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "9bd6fb683b06a026",
+  "text": "5 more guards coming in. Finish up."
+ },
+ "reinforce-6": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "ceeee991662fda73",
+  "text": "6 more guards coming in. Finish up."
+ },
+ "reinforce-7": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "e79f4264243831cd",
+  "text": "7 more guards coming in. Finish up."
+ },
+ "reinforce-8": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "e4d4308cbebe4ee9",
+  "text": "8 more guards coming in. Finish up."
+ },
+ "reinforce-9": {
+  "speaker": "handler",
+  "voice": "af_heart",
+  "key": "ea91e3e0fe1eb7ea",
+  "text": "9 more guards coming in. Finish up."
+ },
+ "vanguard-finale": {
+  "speaker": "vanguard",
+  "voice": "bm_george",
+  "key": "3425446e4b382f50",
+  "text": "Every crate you carry out, we pay for twice. Remember that when the next convoy rolls."
+ },
+ "vanguard-first-word": {
+  "speaker": "vanguard",
+  "voice": "bm_george",
+  "key": "2b4c1cd4f325a85f",
+  "text": "This is Vanguard. That cargo is accounted for. You will be too."
+ },
+ "vanguard-hero-down": {
+  "speaker": "vanguard",
+  "voice": "bm_george",
+  "key": "6a3c8f18711b1d2b",
+  "text": "Raider down. Recover the cargo and log the bounty as unpaid."
+ },
+ "vanguard-zone-clear": {
+  "speaker": "vanguard",
+  "voice": "bm_george",
+  "key": "c04e0c77dda978a5",
+  "text": "Convoy commander lost. Doubling escorts on every route out of the depot."
+ },
+ "vex-mission-cleared": {
+  "speaker": "vex",
+  "voice": "am_puck",
+  "key": "170af20d13f9e9bc",
+  "text": "Lovely. Bring it round to the exchange. I'll have the credits ready, as agreed."
+ }
+}

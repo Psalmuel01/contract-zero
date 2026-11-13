@@ -19,7 +19,7 @@ describe('seven channels reach the right buses', () => {
   it('each slider sets its own bus', () => {
     audio.setMix({ master: 0.5, music: 0, effects: 0.4, voice: 0.3, ambience: 0.2, ui: 0.1, interactions: 0.7 })
     const a = inner(audio)
-    expect(gain(a.master).value).toBeCloseTo(0.5)
+    expect(gain(a.master).value).toBeCloseTo(0.5 * 0.91) // the slider, under the headroom trim (MASTER_TRIM)
     expect(gain(a.gunBus).value).toBeCloseTo(0.37 * 0.4)     // Combat (GUN_LEVEL under the slider)
     expect(gain(a.impactBus).value).toBeCloseTo(0.45 * 0.4)   // Combat (IMPACT_LEVEL under the slider)
     expect(gain(a.voiceBus).value).toBeCloseTo(0.3)          // Radio
