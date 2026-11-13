@@ -337,6 +337,31 @@ impl World {
         Ok(ev)
     }
 
+    /// Undo an accepted proposal whose on-chain fill can never land (the order expired
+    /// on chain before it arrived). On chain the merchant kept its goods and the
+    /// requester's escrow comes back in full, so here each leg returns to the OWNER of
+    /// the escrow it came out of: goods to the merchant, payment to the requester. One
+    /// atomic batch: it fails cleanly if either side no longer holds what it received.
+    /// At most once per fill. Never reachable from `execute`.
+    pub fn reverse_order_fill(&mut self, order: u64, proposal: u64) -> Result<Vec<Event>, EconError> {
+        if self.ledger.iter().any(|e| e.transfer.reason == (Reason::OrderFillReversal { order, proposal })) {
+            return Err(EconError::OrderRejected { why: "that fill was already reversed".into() });
+        }
+        let o = self.orders.get(&order).cloned().ok_or_else(|| unknown("order", &order.to_string()))?;
+        let p = self.proposals.get(&proposal).cloned().ok_or_else(|| unknown("proposal", &proposal.to_string()))?;
+        let merchant_acct = self.actor(&p.merchant)?.account.clone();
+        let owner = |escrow: &str| if escrow == o.escrow() { Some(o.account.clone()) } else if escrow == p.escrow() { Some(merchant_acct.clone()) } else { None };
+        let mut legs = Vec::new();
+        for e in self.ledger.iter().filter(|e| e.transfer.reason == (Reason::OrderFill { order, proposal })) {
+            let to = owner(&e.transfer.from).ok_or_else(|| EconError::OrderRejected { why: "a fill leg did not come from its escrow".into() })?;
+            legs.push(Transfer { from: e.transfer.to.clone(), to, asset: e.transfer.asset, qty: e.transfer.qty, reason: Reason::OrderFillReversal { order, proposal } });
+        }
+        if legs.len() != 2 {
+            return Err(unknown("order fill", &format!("{order}/{proposal}")));
+        }
+        self.apply(&legs)
+    }
+
     pub(crate) fn cancel_order(&mut self, requester: &str, order: u64) -> Result<Vec<Event>, EconError> {
         let o = self.orders.get(&order).ok_or_else(|| unknown("order", &order.to_string()))?;
         if o.requester != requester {

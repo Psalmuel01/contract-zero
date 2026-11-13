@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use sqlx::PgConnection;
 
 use super::near::{NearClient, Role, Verified};
-use super::world::log_event;
+use super::world::{log_event, WorldError};
 use crate::AppState;
 
 /// The reconciliation row for supply-order escrow (the controller's own balance).
@@ -561,6 +561,22 @@ pub async fn process_next(state: &AppState) -> Result<bool, String> {
                 }
             }
         }
+        // A FILL for an order the chain closed or let expire first can never land either.
+        // On chain the merchant kept its goods and the requester's escrow is refunded,
+        // so the engine's fill is undone to match (goods back to the merchant, payment
+        // back to the requester) and the chain is asked to expire the order. Retrying
+        // instead blocked the whole queue behind it: the queue is taken oldest first.
+        if kind == "order_fill" {
+            if let Ok(v) = near.view("get_order", json!({ "order_id": payload["order_id"] })).await {
+                let past_deadline = v["expires_at_ns"].as_u64().is_some_and(|ns| ns / 1_000_000_000 <= chrono::Utc::now().timestamp() as u64);
+                let open = v["state"].as_str() == Some("Open");
+                let moot = matches!(v["state"].as_str(), Some("Refunding") | Some("Closed")) || (open && past_deadline);
+                if moot && !order_step_done(&near, &kind, &payload).await.unwrap_or(true) {
+                    retire_unlandable_fill(state, &near, id, &op_id, &payload, open).await.map_err(|e| e.to_string())?;
+                    return Ok(true);
+                }
+            }
+        }
         match order_step_done(&near, &kind, &payload).await {
             Ok(done) => already = done,
             Err(_) => checked = false,
@@ -736,6 +752,49 @@ async fn order_step(near: &NearClient, kind: &str, p: &Value) -> Result<Vec<Veri
         other => return Err(format!("unknown order step {other}")),
     };
     Ok(vec![v])
+}
+
+/// Retire a fill whose order the chain closed or expired before it landed: reverse it
+/// in the engine and, if the order is still open on chain, queue its expiry (which
+/// refunds the requester). If the engine can't reverse it (the goods were already
+/// used), it is marked failed for review rather than retried, and never forced into
+/// a negative balance.
+async fn retire_unlandable_fill(state: &AppState, near: &NearClient, id: i64, op_id: &str, payload: &Value, expire_on_chain: bool) -> Result<(), sqlx::Error> {
+    let order_id = payload["order_id"].as_str().unwrap_or_default().to_string();
+    let proposal_id = payload["proposal_id"].as_str().unwrap_or_default().to_string();
+    let (oid, pid) = (order_id.clone(), proposal_id.clone());
+    let res = state
+        .world
+        .transact(async move |w, db| {
+            let order = w.orders.values().find(|o| o.chain_order_id() == oid).map(|o| o.id);
+            let proposal = w.proposals.keys().copied().find(|p| chain_proposal_id(*p) == pid);
+            let (Some(order), Some(proposal)) = (order, proposal) else {
+                return Err(WorldError::Other(format!("order {oid} / proposal {pid} not found in the engine")));
+            };
+            let events = w.reverse_order_fill(order, proposal)?;
+            if expire_on_chain {
+                enqueue(&mut *db, near, "order_expire", &format!("expire:{oid}"), w.tick, &json!({ "order_id": oid })).await?;
+            }
+            Ok(events)
+        })
+        .await;
+    let db = state.world.db();
+    let tick = state.world.read(|w| w.tick).await;
+    match res {
+        Ok(_) => {
+            let note = format!("order {order_id} expired on chain before this fill reached it; the fill was reversed in the economy{}", if expire_on_chain { " and the order's expiry queued" } else { "" });
+            sqlx::query("UPDATE settlements SET status = 'compensated', error = $2, lease_until = NULL WHERE id = $1").bind(id).bind(&note).execute(db).await?;
+            let _ = log_event(db, tick, "near", "settlement", &json!({ "op_id": op_id, "kind": "order_fill", "status": "compensated", "note": note })).await;
+            tracing::warn!("settlement {op_id}: {note}");
+        }
+        Err(e) => {
+            let note = format!("order {order_id} expired on chain before this fill reached it, and the economy could not reverse it ({e}); needs review");
+            sqlx::query("UPDATE settlements SET status = 'failed', error = $2, lease_until = NULL WHERE id = $1").bind(id).bind(&note).execute(db).await?;
+            let _ = log_event(db, tick, "near", "settlement", &json!({ "op_id": op_id, "kind": "order_fill", "status": "failed", "note": note })).await;
+            tracing::error!("settlement {op_id}: {note}");
+        }
+    }
+    Ok(())
 }
 
 /// If an order is stuck refunding (its refund settlement failed), retry it.

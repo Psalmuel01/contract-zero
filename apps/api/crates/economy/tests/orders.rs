@@ -319,3 +319,44 @@ fn an_unanswered_sell_order_is_not_reposted_for_a_day() {
     for _ in 0..policy::SELL_RETRY_TICKS { w.tick(); }
     assert!(policy::commander(&w, VANGUARD).iter().any(|d| d.trigger == "fuel surplus"), "offered again a day later");
 }
+
+#[test]
+fn a_fill_the_chain_never_applied_reverses_to_what_the_chain_holds() {
+    // The order expired on chain before its fill landed: there, the merchant kept its
+    // goods and the requester's escrow came back in full. Reversing the fill must
+    // leave both exactly where they started, and only once.
+    let mut w = world();
+    let (vg_cr, vg_ammo) = (w.balance(VG, Asset::Credits), w.balance(VG, Asset::Res(Resource::Ammo)));
+    let (vex_cr, vex_ammo) = (w.balance(VEX_ACC, Asset::Credits), w.balance(VEX_ACC, Asset::Res(Resource::Ammo)));
+    as_vg(&mut w, buy(30, 900, false, 1, 1)).unwrap();
+    let o = last_order(&w);
+    propose(&mut w, MERCHANT, o, 30, 720).unwrap();
+    let p = last_proposal(&w);
+    as_vg(&mut w, Action::AcceptProposal { order: o, proposal: p }).unwrap();
+    assert_eq!(w.balance(VG, Asset::Res(Resource::Ammo)), vg_ammo + 30, "the fill landed in the engine");
+
+    w.reverse_order_fill(o, p).unwrap();
+    assert_eq!(w.balance(VG, Asset::Credits), vg_cr, "the requester is whole: unused refund plus the payment back");
+    assert_eq!(w.balance(VG, Asset::Res(Resource::Ammo)), vg_ammo);
+    assert_eq!(w.balance(VEX_ACC, Asset::Credits), vex_cr);
+    assert_eq!(w.balance(VEX_ACC, Asset::Res(Resource::Ammo)), vex_ammo, "the merchant kept its goods, as on chain");
+    assert!(w.reverse_order_fill(o, p).is_err(), "a fill is reversed at most once");
+    conserved(&w);
+}
+
+#[test]
+fn a_fill_whose_goods_were_already_used_is_not_reversed_into_debt() {
+    let mut w = world();
+    as_vg(&mut w, buy(30, 900, false, 1, 1)).unwrap();
+    let o = last_order(&w);
+    propose(&mut w, MERCHANT, o, 30, 720).unwrap();
+    let p = last_proposal(&w);
+    as_vg(&mut w, Action::AcceptProposal { order: o, proposal: p }).unwrap();
+    // Vanguard burns through its ammunition before anyone notices the chain refused.
+    let have = w.balance(VG, Asset::Res(Resource::Ammo));
+    w.apply(&[Transfer { from: VG.into(), to: WORLD.into(), asset: Asset::Res(Resource::Ammo), qty: have, reason: Reason::Consumption }]).unwrap();
+    let before = w.ledger.len();
+    assert!(w.reverse_order_fill(o, p).is_err(), "no negative balance, no invented ammunition");
+    assert_eq!(w.ledger.len(), before, "nothing moved");
+    conserved(&w);
+}

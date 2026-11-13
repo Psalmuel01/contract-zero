@@ -268,6 +268,9 @@ pub enum Reason {
     ProposalRelease { proposal: u64 },
     /// An accepted proposal: both escrows change hands.
     OrderFill { order: u64, proposal: u64 },
+    /// Undoes a fill the chain never applied (its order expired on chain first): the
+    /// goods go back to the merchant and the payment back to the requester.
+    OrderFillReversal { order: u64, proposal: u64 },
     /// Faction treasury above its war chest, remitted to command (destroyed).
     Remittance,
     /// The merchant's side of a player quote, held so no one else can buy or spend it.
