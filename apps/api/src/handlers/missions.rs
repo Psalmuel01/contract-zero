@@ -172,6 +172,12 @@ type SessionRow = (String, i64, f64, DateTime<Utc>, Option<DateTime<Utc>>, Optio
 /// A bound on what a scripted client could extract, not a game rule players meet.
 pub const MAX_PAID_PER_HOUR: i64 = 8;
 
+/// Bounds a wait for a session's row lock, per transaction (`SET LOCAL` survives a
+/// transaction-mode pooler; a connection-level setting may not). Sessions are locked
+/// only after the world lock (see `events`), so this should never fire; if a future
+/// change breaks that order, the request fails instead of freezing every tick.
+const SESSION_LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '10s'";
+
 pub async fn complete(state: web::Data<AppState>, req: HttpRequest, path: web::Path<Uuid>, body: web::Json<CompleteRequest>) -> HttpResponse {
     let who = match crate::handlers::auth::player(&state, &req).await {
         Ok(s) => s,
@@ -187,6 +193,8 @@ pub async fn complete(state: web::Data<AppState>, req: HttpRequest, path: web::P
     let res = state
         .world
         .transact(async move |w, db| {
+            // Holding the world lock: never wait on a session row indefinitely.
+            sqlx::query(SESSION_LOCK_TIMEOUT).execute(&mut *db).await?;
             let row: Option<SessionRow> = sqlx::query_as(
                 "SELECT player, raid_id, min_secs, started_at, completed_at, result, field, protocol, field_state FROM mission_sessions WHERE id = $1 FOR UPDATE",
             )
@@ -371,7 +379,18 @@ pub async fn events(state: web::Data<AppState>, req: HttpRequest, path: web::Pat
     }
     let db = state.world.db();
     let res: Result<Value, String> = async {
+        // LOCK ORDER: the world lock is always taken before a session's row lock.
+        // `complete` holds the world lock and then locks the session row; reading the
+        // world here while holding that row deadlocked the two, and with them every
+        // tick and world read, whenever a final event batch and the end-of-mission
+        // call arrived together. So the raid's kind is read first, with no row held.
+        let raid_of: Option<(i64,)> = sqlx::query_as("SELECT raid_id FROM mission_sessions WHERE id = $1")
+            .bind(session).fetch_optional(db).await.map_err(|e| e.to_string())?;
+        let Some((raid_of,)) = raid_of else { return Err("unknown session".into()) };
+        let kind = state.world.read(|w| w.raids.get(&(raid_of as u64)).map(|r| r.plan.kind)).await.ok_or("raid not found")?;
         let mut tx = db.begin().await.map_err(|e| e.to_string())?;
+        // A row wait that outlives this is a bug, not load: fail the batch, never the world.
+        sqlx::query(SESSION_LOCK_TIMEOUT).execute(&mut *tx).await.map_err(|e| e.to_string())?;
         let row: Option<(String, i64, DateTime<Utc>, Option<DateTime<Utc>>, DateTime<Utc>, i32, Option<String>, Option<Value>, Option<Value>)> = sqlx::query_as(
             "SELECT player, raid_id, started_at, completed_at, expires_at, protocol, layout, field, field_state FROM mission_sessions WHERE id = $1 FOR UPDATE",
         ).bind(session).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?;
@@ -388,7 +407,9 @@ pub async fn events(state: web::Data<AppState>, req: HttpRequest, path: web::Pat
         if proto < 2 {
             return Err("this session predates the event protocol".into());
         }
-        let kind = state.world.read(|w| w.raids.get(&(raid_id as u64)).map(|r| r.plan.kind)).await.ok_or("raid not found")?;
+        if raid_id != raid_of {
+            return Err("session changed while it was read".into());
+        }
         let layout = layout.as_deref().and_then(|l| protocol::LAYOUTS.get(l)).ok_or("unknown map for this session")?;
         let manifest: FieldManifest = field.and_then(|v| serde_json::from_value(v).ok()).ok_or("session has no object list")?;
         let mut st: FieldState = fs.and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
