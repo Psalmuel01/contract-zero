@@ -10,6 +10,9 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
+import { useGLTF } from '@react-three/drei';
+import { makeTriplanarMaterial } from './triplanar';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import * as THREE from 'three';
 import type { Art, Box, LevelDef } from '../fps/levels';
 import { usePbr } from './usePbr';
@@ -20,7 +23,7 @@ const HANGAR = '/textures/hangar';
 type Inst = { x: number; y: number; z: number; sx: number; sy: number; sz: number; rx?: number; ry?: number; rz?: number; color?: string };
 
 /** Instanced unit boxes (optionally per-instance tinted). */
-function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; material: THREE.Material; cast?: boolean; geometry?: THREE.BufferGeometry }) {
+function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; material: THREE.Material | THREE.Material[]; cast?: boolean; geometry?: THREE.BufferGeometry }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   useEffect(() => {
     const m = ref.current;
@@ -231,6 +234,25 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
   const delivering = isDelivering(cues);
   // Night look (glowing windows, cool lamps) follows the hour, not the map.
   const night = nightProp ?? level.id === 'blacksite';
+  const kit = useGLTF('/models/production/modular-kit.glb');
+  const modules = useMemo(() => {
+    const out: Record<string, { geometry: THREE.BufferGeometry; materials: THREE.Material[] }> = {};
+    for (const name of ['container', 'barrier', 'case', 'truck', 'pump']) {
+      const group = kit.scene.getObjectByName(name);
+      if (!group) continue;
+      const geos: THREE.BufferGeometry[] = [], materials: THREE.Material[] = [];
+      group.traverse((o) => {
+        if (!(o instanceof THREE.Mesh)) return;
+        geos.push(o.geometry.clone());
+        materials.push(o.material as THREE.Material);
+      });
+      const geometry = mergeGeometries(geos, true);
+      geos.forEach((g) => g.dispose());
+      if (geometry) out[name] = { geometry, materials };
+    }
+    return out;
+  }, [kit.scene]);
+  useEffect(() => () => Object.values(modules).forEach((m) => m.geometry.dispose()), [modules]);
   const corrugated = usePbr('corrugated_iron_02', [1, 1], HANGAR, colourOnly);
   const plate = usePbr('metal_plate', [1, 1], HANGAR, colourOnly);
   const concrete = usePbr('concrete_floor_worn_001', [1, 1], HANGAR, colourOnly);
@@ -239,7 +261,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
 
   const mats = useMemo(() => {
     const tri = (maps: { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture }, o: THREE.MeshStandardMaterialParameters) =>
-      new THREE.MeshStandardMaterial({ ...maps, ...o });
+      makeTriplanarMaterial(maps, o, { metresPerTile: 1.5, detail: minimal ? 0 : 5.3, detailAmount: 0.3, macro: minimal ? 0 : 0.17, macroAmount: 0.25 });
     const link = chainLink();
     link.repeat.set(1, 1);
     return {
@@ -280,7 +302,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       signBar: new THREE.MeshBasicMaterial({ color: '#ffffff' }),
       mattress: new THREE.MeshStandardMaterial({ color: '#cfd6dc', roughness: 0.9 }),
     };
-  }, [corrugated, plate, concrete, plaster, planks, night, level.id]);
+  }, [corrugated, plate, concrete, plaster, planks, night, level.id, minimal]);
 
   const parts = useMemo(() => {
     const out: Record<string, Inst[]> = {};
@@ -294,12 +316,14 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       const fwd = (t: number): [number, number] => (alongZ ? [x, z + t] : [x + t, z]);
       switch (b.kind) {
         case 'container': {
+          if (!minimal) { add('authored_container', { x, y: h / 2, z, sx: w, sy: h, sz: d, color: b.color }); break; }
           add('container', { x, y: h / 2, z, sx: w, sy: h, sz: d, color: b.color });
           if (h > 3) add('frame', { x, y: h / 2, z, sx: w + 0.04, sy: 0.08, sz: d + 0.04 }); // stack seam
           add('frame', { x, y: h - 0.05, z, sx: w + 0.06, sy: 0.1, sz: d + 0.06 });
           break;
         }
         case 'truck': {
+          if (!minimal) { add('authored_truck', { x, y: h / 2, z, sx: wid, sy: h, sz: len, ry }); break; }
           const [cx, cz] = fwd(len / 2 - 1.1);
           add('olive', { x: cx, y: 1.45, z: cz, sx: wid, sy: 1.6, sz: 2, ry });            // cab
           add('glass', { x: cx, y: 1.85, z: cz + (alongZ ? 1.01 : 0), sx: alongZ ? wid * 0.9 : 0.04, sy: 0.55, sz: alongZ ? 0.04 : wid * 0.9 }); // windscreen
@@ -318,6 +342,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           { const [ax, az] = fwd(0); add('steel', { x: ax, y: h, z: az, sx: alongZ ? 0.05 : len, sy: 0.05, sz: alongZ ? len : 0.05 }); }
           break;
         case 'barrier':
+          if (!minimal) { add('authored_barrier', { x, y: h / 2, z, sx: wid, sy: h, sz: len, ry }); break; }
           add('concrete', { x, y: 0.22, z, sx: w, sy: 0.44, sz: d });
           add('concrete', { x, y: h * 0.7, z, sx: alongZ ? w * 0.45 : w, sy: h * 0.6, sz: alongZ ? d : d * 0.45 });
           break;
@@ -343,6 +368,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           add('wood', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           break;
         case 'case':
+          if (!minimal) { add('authored_case', { x, y: h / 2, z, sx: w, sy: h, sz: d }); break; }
           add('case', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           add('frame', { x, y: h * 0.75, z, sx: w + 0.02, sy: 0.06, sz: d + 0.02 });
           break;
@@ -398,6 +424,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           }
           break;
         case 'pump':
+          if (!minimal) { add('authored_pump', { x, y: h / 2, z, sx: w, sy: h, sz: d }); break; }
           // A pump skid: a base, the motor and the pump casing.
           add('steel', { x, y: 0.15, z, sx: w, sy: 0.3, sz: d });
           add('rust', { x: x - w * 0.2, y: 0.75, z, sx: w * 0.45, sy: 0.9, sz: d * 0.7 });
@@ -524,7 +551,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       }
     }
     return out;
-  }, [level]);
+  }, [level, minimal]);
 
   const beacons = level.art.filter((a) => a.kind === 'beacon');
   const floods = level.art.filter((a) => a.kind === 'floodlight');
@@ -535,7 +562,8 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
     <group>
       {terrain && <Mountains color={night ? '#0b1220' : level.id === 'cinder_yard' ? '#4a3426' : '#5a3f30'} />}
       {Object.entries(parts).map(([k, items]) =>
-        k === 'tankCyl' ? <Instanced key={k} items={items} material={mats.tank} geometry={CYL} cast={cast} />
+        k.startsWith('authored_') && modules[k.slice(9)] ? <Instanced key={k} items={items} material={modules[k.slice(9)].materials} geometry={modules[k.slice(9)].geometry} cast={cast} />
+        : k === 'tankCyl' ? <Instanced key={k} items={items} material={mats.tank} geometry={CYL} cast={cast} />
         : k === 'pipeCyl' ? <Instanced key={k} items={items} material={mats.pipe} geometry={CYL} cast={cast} />
         : k === 'drumCyl' ? <Instanced key={k} items={items} material={mats.drum} geometry={CYL} cast={cast} />
         : k === 'hazardCyl' ? <Instanced key={k} items={items} material={mats.hazard} geometry={CYL} cast={false} />

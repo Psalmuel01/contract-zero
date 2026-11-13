@@ -1,0 +1,25 @@
+{
+  "source_commit": "5c06736ffa1d0aea966fa888846a46ced80f7e88",
+  "assets": [
+    {
+      "file": "apps/web/public/models/guns/rifle.glb",
+      "bytes": 133980,
+      "triangles": 1930,
+      "materials": 3
+    },
+    {
+      "file": "apps/web/public/models/guns/blaster.glb",
+      "bytes": 91088,
+      "triangles": 2816,
+      "materials": 4
+    },
+    {
+      "file": "apps/web/public/characters/glb/operator.glb",
+      "bytes": 2016872,
+      "triangles": 13888,
+      "materials": 2
+    }
+  ],
+  "hardware_measurements": null,
+  "capture_status": "Native browser screenshot returned blank; archived screenshots copied to before/. These are not fresh matched-view captures."
+}

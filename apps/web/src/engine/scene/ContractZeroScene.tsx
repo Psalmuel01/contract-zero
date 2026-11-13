@@ -32,6 +32,8 @@ import { OperatorRig, type OperatorApi } from './OperatorRig';
 import { LEVELS } from '../fps/levels';
 import { groundHeight, railedMove } from '../fps/decks';
 import { LevelArt } from './LevelArt';
+import { makeSiteGround } from './siteGround';
+import { reloadPose, safeWeaponDepth } from './viewmodelPose';
 import { SiteDressing, SiteSky } from './SiteDressing';
 import { gradeTheme, type Phase as SitePhase } from './siteLook';
 /** Where the sun sits over a structured site (matches the key light's offset below). */
@@ -921,6 +923,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   // Touch and minimal tiers load colour maps only (two thirds less texture memory; see usePbr).
   const colourOnly = lowSpec || minimal;
   const floorMaps = usePbr('burned_ground_01', [12, 20], undefined, colourOnly);
+  const hardstandingMaps = usePbr('concrete_floor_worn_001', [1, 1], '/textures/hangar', colourOnly);
   const brickMaps = usePbr('broken_brick_wall', [7, 1.6], undefined, colourOnly);
   const plasterMaps = usePbr('damaged_plaster', [4, 1.4], undefined, colourOnly);
   const plankMaps = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
@@ -958,7 +961,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     [minimal],
   );
   const shellMaterials = useMemo(() => ({
-    floor: makeTriplanarMaterial(floorMaps, { color: theme.floorTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.9, detail: 9.7, detailAmount: 0.6, macro: 0.11, macroAmount: 0.4, ...octaves }),
+    floor: makeSiteGround(floorMaps, hardstandingMaps, LEVEL?.id, theme.floorTint, minimal),
     brick: makeTriplanarMaterial(brickMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.7, detail: 9.3, detailAmount: 0.62, macro: 0.13, macroAmount: 0.3, ...octaves }),
     plaster: makeTriplanarMaterial(plasterMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.8, detail: 8.7, detailAmount: 0.68, macro: 0.13, macroAmount: 0.32, ...octaves }),
     // Cover boxes are the surface you are most often pressed right up against —
@@ -986,7 +989,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // The cap on top of a wall. Was a flat grey box, which read as the graybox it
     // was; concrete at a coarse tile makes it a poured coping instead.
     coping: makeTriplanarMaterial(plasterMaps, { color: '#59565e', roughness: 0.9, metalness: 0 }, { metresPerTile: 1.3, detail: 9.1, detailAmount: 0.5, ...octaves }),
-  }), [floorMaps, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves]);
+  }), [floorMaps, hardstandingMaps, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves, LEVEL?.id, minimal]);
 
   /**
    * Set-dressing surfaces.
@@ -1190,6 +1193,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   // ── Scene objects ──
   const vmRef = useRef<THREE.Group>(null);
+  const reloadStartedAt = useRef(0);
   const swapRaise = useRef(0);          // 1 → 0 dip when a weapon is raised
   const wantSlot = useRef<number | null>(null); // 1/2 keys pick a slot
   const wantSwap = useRef(false);       // the swap key cycles
@@ -1982,6 +1986,11 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
      */
     const handsGroup = activeMesh.getObjectByName('hands');
     if (handsGroup) handsGroup.visible = adsCur.current < 0.45;
+    const reload = reloadPose((sim.time - reloadStartedAt.current) / sim.gun.reloadTime, sim.reloading, !!settingsRef?.current.access.reduceMotion);
+    const magazine = activeMesh.getObjectByName('magazine');
+    if (magazine) magazine.position.y = -reload.magazineDrop;
+    const support = handsGroup?.getObjectByName('support-hand');
+    if (support && typeof support.userData.restY === 'number') support.position.y = support.userData.restY - reload.handReach;
     swapRaise.current = Math.max(0, swapRaise.current - dt * 2.4);
     const vm = vmRef.current;
     // While the weapon is on the deck it must not also be in your hands.
@@ -1995,10 +2004,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       local.y += Math.abs(Math.cos(bobPhase.current)) * bob;
       local.y -= swapRaise.current * 0.22;                  // dips down as it's raised
       local.z += recoilP.current * 2.2; // kick back toward the camera on fire
-      // WALL PULLBACK: retract the viewmodel toward the eye when a wall is close ahead,
-      // so the barrel can't poke through geometry when you press up against it. Cast the
-      // camera's forward ray at the colliders; the nearer the wall, the further back the
-      // gun is pulled (never fully collapsed, so it doesn't pop out of view).
+      // Near-wall presentation follows the camera ray against the actual colliders.
+      // Keep the stock ahead of the eye and lower the muzzle as the wall approaches.
       cam.getWorldDirection(fwd);
       const gco: Vec3 = [cam.position.x, cam.position.y, cam.position.z];
       const gcd: Vec3 = [fwd.x, fwd.y, fwd.z];
@@ -2007,15 +2014,15 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         const tc = rayAABB(gco, gcd, aabbOfCover(c));
         if (tc !== null && tc < wallAhead) wallAhead = tc;
       }
-      const GUN_CLEAR = 1.1; // begin retracting when a wall is within this many metres
-      if (wallAhead < GUN_CLEAR) {
-        const k = Math.max(0.12, wallAhead / GUN_CLEAR);
-        local.z *= k;                 // barrel drawn back toward the eye
-        local.y -= (1 - k) * 0.06;    // and dipped a touch, like lowering the weapon
-      }
+      const GUN_CLEAR = 1.1; // begin lowering inside this distance
+      // Lower the muzzle rather than pushing the stock through the eye plane.
+      const wallLower = 1 - THREE.MathUtils.clamp(wallAhead / GUN_CLEAR, 0, 1);
+      local.y -= wallLower * 0.14 + reload.dip;
+      local.z = safeWeaponDepth(local.z, GUN_LENGTH[activeId], view.scale);
       vm.position.copy(cam.localToWorld(local));
       vm.quaternion.copy(cam.quaternion);
-      vm.rotateX(-recoilP.current * 1.6);
+      vm.rotateX(-recoilP.current * 1.6 - wallLower * 0.65);
+      vm.rotateZ(reload.roll);
       vm.updateMatrixWorld();
     }
 
@@ -2149,6 +2156,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         swapRaise.current = 1;      // the new weapon dips in from below
         audio.reloadEnd();          // a mechanical rack/click
       } else if (ev.kind === 'reloadStart') {
+        reloadStartedAt.current = sim.time;
         audio.reloadStart();
       } else if (ev.kind === 'reloadEnd') {
         audio.reloadDone();         // mag-in + charging-handle rack
@@ -5065,7 +5073,7 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           <span style={{ fontSize: 12, letterSpacing: 2, color: '#6f7d8c' }}>{mode === 'endless' ? `CONTRACT ZERO · ${seasonal ? 'SEASONAL CAMPAIGN' : 'ENDLESS'} · ${mission.name}` : mode === 'gauntlet' ? 'CONTRACT ZERO · GAUNTLET · RANKED' : mode === 'survival' ? 'CONTRACT ZERO · SURVIVAL · THE KILL-HOUSE' : mode === 'contract' ? `CONTRACT ZERO · ${mission.name}` : `CONTRACT ZERO · ${mission.zone} · OP ${missionIndex + 1}/${CAMPAIGN.length}`}</span>
         </div>
         {!isTouch && (
-          <div style={{ position: 'absolute', right: 26, top: 20, fontSize: 11, lineHeight: 1.7, textAlign: 'right', color: '#6f7d8c' }}>
+          <div style={{ position: 'absolute', right: 26, top: 20, maxWidth: '42vw', fontSize: 11, lineHeight: 1.7, textAlign: 'right', color: '#c4ced7', background: 'rgba(8,12,16,.72)', padding: '6px 10px', borderRadius: 4 }}>
             {(() => {
               const b = settings.controls.binds, k = (a: Action) => bindLabel(b, a);
               return (<>

@@ -14,6 +14,12 @@ Every file the web app ships under `public/`, where it came from, and its licenc
 - **Sidearm, SMG and Marksman rifle**: original procedural models, built in code (`src/engine/scene/proceduralGuns.ts`). They replaced three GLB files whose source could not be confirmed.
 - **The five seasonal weapons**: original procedural models, same file.
 
+## Production models
+
+- `public/models/production/service-carbine.glb`: original CONTRACT ZERO service carbine, **MIT**, authored and baked by `scripts/build-visual-kit.mjs`. Replaces the Poly Pizza rifle in the player viewmodel; the old rifle remains for the existing world/guard pipeline.
+- `public/models/production/modular-kit.glb`: original reusable container, jersey-barrier, equipment-case, logistics-truck and pump-skid modules, **MIT**, same authoring source. No external model inputs or textures. Dimensions use a unit envelope mapped to the existing colliders.
+- `public/models/production/inventory.json`: generated sizes, triangle counts and provenance. Rerun the script to regenerate all three files. GLBs use standard glTF 2.0 metallic/roughness materials. They have no texture payload; this pass reuses the existing JPEG PBR maps. KTX2/Basis conversion is not implemented.
+
 ## Characters
 
 - **Operator rig** (`public/characters/glb/operator.glb`): a skinned body with rifle animation clips from Adobe [Mixamo](https://www.mixamo.com), assembled by `scripts/build_operator_glb.py`.

@@ -417,6 +417,8 @@ export function buildViewmodelHands(gunId: GunId, gun: THREE.Object3D, len: numb
       forearmPitch: 0.32, forearmYaw: 0.24,
     });
     support.position.set(...anchor(tune.support, -0.010));
+    support.name = 'support-hand';
+    support.userData.restY = support.position.y;
     support.rotation.set(0.24, 0, -0.16);
     group.add(support);
   } else {

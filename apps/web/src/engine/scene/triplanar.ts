@@ -153,10 +153,18 @@ export function makeTriplanarMaterial(
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
-        vTriPos = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
-        // Non-uniform scale is fine here: every mesh using this material is an
-        // axis-aligned box or plane, so scaling a face normal cannot rotate it.
-        vTriNrm = normalize( mat3( modelMatrix ) * objectNormal );`,
+        vec3 triLocalPosition = transformed;
+        vec3 triLocalNormal = objectNormal;
+        #ifdef USE_INSTANCING
+          triLocalPosition = ( instanceMatrix * vec4( transformed, 1.0 ) ).xyz;
+          mat3 triInstance = mat3( instanceMatrix );
+          // Inverse transpose for orthogonal rotation/scale (the same correction
+          // as three's defaultnormal_vertex). Instance size must not stretch UVs.
+          triLocalNormal /= vec3( dot(triInstance[0],triInstance[0]), dot(triInstance[1],triInstance[1]), dot(triInstance[2],triInstance[2]) );
+          triLocalNormal = triInstance * triLocalNormal;
+        #endif
+        vTriPos = ( modelMatrix * vec4( triLocalPosition, 1.0 ) ).xyz;
+        vTriNrm = normalize( mat3( modelMatrix ) * triLocalNormal );`,
       )
       // <project_vertex> is where three builds mvPosition; -z out of it is the
       // view distance the detail octave fades over.

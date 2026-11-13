@@ -1,0 +1,18 @@
+[
+  {
+    "file": "service-carbine.glb",
+    "bytes": 330688,
+    "triangles": 3380,
+    "primitives": 6,
+    "license": "MIT",
+    "source": "scripts/build-visual-kit.mjs"
+  },
+  {
+    "file": "modular-kit.glb",
+    "bytes": 401088,
+    "triangles": 4048,
+    "primitives": 14,
+    "license": "MIT",
+    "source": "scripts/build-visual-kit.mjs"
+  }
+]

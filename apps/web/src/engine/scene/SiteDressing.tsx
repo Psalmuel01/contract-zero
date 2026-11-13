@@ -14,13 +14,14 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
+import { buildTerrainApron } from './terrainRelief';
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { LevelDef } from '../fps/levels';
 import type { ZoneTheme } from '../fps/campaign';
 import { factionPaint as factionColor } from '@/lib/factions';
 import { paintInsignia } from '@/lib/insignia';
-import { LANDMARKS, MARKS, SIGN_WORDS, TERRAIN, airborne, groundWear, mixHex, perimeterWall, type Landmark, type Mark, type Phase } from './siteLook';
+import { LANDMARKS, MARKS, SIGN_WORDS, TERRAIN, airborne, groundWear, perimeterWall, type Landmark, type Mark, type Phase } from './siteLook';
 import { bannerTexture, hazardTexture, insigniaTexture, puffTexture, rng, stencilTexture, wearTexture } from './siteTextures';
 
 // ── Sky ─────────────────────────────────────────────────────────────────────
@@ -112,7 +113,9 @@ function profile(shape: 'mesa' | 'ridge' | 'flats', a: number, seed: number): nu
   return 0.35 + n * 0.3;
 }
 
-export function SiteTerrain({ level, phase, theme, center }: { level: LevelDef; phase: Phase; theme: ZoneTheme; center: [number, number] }) {
+export function SiteTerrain({ level, phase, theme, center, minimal = false }: { level: LevelDef; phase: Phase; theme: ZoneTheme; center: [number, number]; minimal?: boolean }) {
+  const apron = useMemo(() => buildTerrainApron(level, minimal), [level, minimal]);
+  useEffect(() => () => apron.dispose(), [apron]);
   const t = TERRAIN[level.id];
   const geo = useMemo(() => {
     const pos: number[] = [], col: number[] = [];
@@ -141,16 +144,14 @@ export function SiteTerrain({ level, phase, theme, center }: { level: LevelDef; 
     return g;
   }, [t, phase, theme.fog, level.id, center]);
   useEffect(() => () => geo.dispose(), [geo]);
-  const groundColor = useMemo(() => mixHex(theme.floorTint, theme.fog[0], 0.35), [theme.floorTint, theme.fog]);
   return (
     <group>
       <mesh geometry={geo} frustumCulled={false}>
         <meshBasicMaterial vertexColors side={THREE.DoubleSide} fog={false} />
       </mesh>
       {/* the land between the yard's floor and the ridges, fading into the haze */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[center[0], -0.06, center[1]]}>
-        <circleGeometry args={[t.rings[1][0] + 10, 48]} />
-        <meshStandardMaterial color={groundColor} roughness={1} />
+      <mesh geometry={apron} receiveShadow>
+        <meshStandardMaterial color="#ffffff" vertexColors roughness={1} envMapIntensity={0.25} />
       </mesh>
     </group>
   );
@@ -602,7 +603,7 @@ export function SiteDressing({ level, theme, phase, holder, minimal, frozen, par
   const flagTex = useMemo(() => (LANDMARKS[level.id].some((l) => l.kind === 'flag') ? flagTexture(holder) : null), [level.id, holder]);
   return (
     <group>
-      <SiteTerrain level={level} phase={phase} theme={theme} center={center} />
+      <SiteTerrain level={level} phase={phase} theme={theme} center={center} minimal={minimal} />
       {!minimal && (
         <MergeStatic key={`${level.id}-${phase}`}>
           {LANDMARKS[level.id].map((l, i) => <LandmarkMesh key={i} l={l} mats={mats} phase={phase} frozen={frozen} flagTex={flagTex} bounds={level.bounds} />)}
