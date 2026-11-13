@@ -41,6 +41,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/warroom/procurement", web::get().to(warroom::procurement))
         .route("/warroom/operations", web::get().to(warroom::operations))
         .route("/observer/simulate", web::post().to(world::simulate))
+        .route("/missions/active/abandon", web::post().to(missions::abandon_active))
         .route("/missions/start", web::post().to(missions::start))
         .route("/missions/{session}/story", web::get().to(missions::story))
         .route("/missions/{session}/aftermath", web::get().to(missions::aftermath))

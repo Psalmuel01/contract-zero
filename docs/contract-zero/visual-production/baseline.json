@@ -1,0 +1,29 @@
+{
+  "source_commit": "5c06736ffa1d0aea966fa888846a46ced80f7e88",
+  "assets": [
+    {
+      "file": "apps/web/public/models/guns/rifle.glb",
+      "bytes": 133980,
+      "triangles": 1930,
+      "materials": 3
+    },
+    {
+      "file": "apps/web/public/models/guns/blaster.glb",
+      "bytes": 91088,
+      "triangles": 2816,
+      "materials": 4
+    },
+    {
+      "file": "apps/web/public/characters/glb/operator.glb",
+      "bytes": 2016872,
+      "triangles": 13888,
+      "materials": 2
+    }
+  ],
+  "hardware_measurements": {
+    "machine": "Apple M2 (10-core GPU), headless Chrome on the GPU, uncapped frame rate",
+    "probe": "GPU=1 PHASES=day,night node apps/web/probe-site-perf.mjs",
+    "note": "medians before/after and the night p95 ranges are in REPORT.md; not a phone or low-end laptop"
+  },
+  "capture_status": "Matched captures of 92be973 (before) and this pass (after) from fixed viewpoints on the GPU: see GALLERY.md. The archived screenshots are no longer used."
+}

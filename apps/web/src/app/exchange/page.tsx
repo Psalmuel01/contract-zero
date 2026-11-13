@@ -18,9 +18,11 @@ import type { GunId } from '@/engine/combat/GunStats'
 import { ItemInspector } from '@/components/inspect/ItemInspector'
 import { acceptQuote, disableQuickTrade, enableQuickTrade, loadSessionKey } from '@/lib/auth'
 import { useSession } from '@/lib/useSession'
+import { useSettings } from '@/lib/settings'
 import type { ChainCall } from '@/lib/wallet'
 
 const GunTurntable = dynamic(() => import('@/components/armory/GunTurntable'), { ssr: false })
+const MarketFloor = dynamic(() => import('@/components/market/MarketFloor'), { ssr: false, loading: () => <div className="aspect-[4/3] w-full bg-ink-2 sm:aspect-[21/8]" aria-hidden /> })
 
 const ACCEPT_GAS = '60000000000000'
 
@@ -181,6 +183,7 @@ export default function Exchange() {
   const [now, setNow] = useState(Date.now())
   const [quick, setQuick] = useState(false)
   const market = useMarket()
+  const settings = useSettings()
   const [orderMsg, setOrderMsg] = useState<string | null>(null)
 
   useEffect(() => {
@@ -264,6 +267,10 @@ export default function Exchange() {
       <div className="mb-3 flex justify-end"><AdvancedSwitch /></div>
       {ex.isError && <p className="mb-4 text-hostile">The economy server is not reachable.</p>}
 
+      {/* The market floor: both merchants, their real shelves and live prices. */}
+      {market.data && market.data.merchants.length > 0 && (
+        <div className="cz-panel mb-4 p-2"><MarketFloor merchants={market.data.merchants} reduce={settings.access.reduceMotion} /></div>
+      )}
       {!session && (
         <Panel className="mb-4">
           <div className="flex items-center justify-between gap-3">

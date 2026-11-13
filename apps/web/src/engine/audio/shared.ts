@@ -27,3 +27,8 @@ export function releaseAudio(): void {
 /** Without taking a reference (probes, devtools). */
 export const peekAudio = (): FpsAudio | null => instance
 export const audioRefs = () => refs
+
+// Development builds: let probes reach the one engine from any screen (to record the mix).
+if (typeof window !== 'undefined' && process.env.NODE_ENV !== 'production') {
+  ;(window as unknown as { __czSharedAudio?: () => FpsAudio | null }).__czSharedAudio = peekAudio
+}

@@ -10,6 +10,9 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
+import { useGLTF } from '@react-three/drei';
+import { makeTriplanarMaterial } from './triplanar';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import * as THREE from 'three';
 import type { Art, Box, LevelDef } from '../fps/levels';
 import { usePbr } from './usePbr';
@@ -20,7 +23,7 @@ const HANGAR = '/textures/hangar';
 type Inst = { x: number; y: number; z: number; sx: number; sy: number; sz: number; rx?: number; ry?: number; rz?: number; color?: string };
 
 /** Instanced unit boxes (optionally per-instance tinted). */
-function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; material: THREE.Material; cast?: boolean; geometry?: THREE.BufferGeometry }) {
+function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; material: THREE.Material | THREE.Material[]; cast?: boolean; geometry?: THREE.BufferGeometry }) {
   const ref = useRef<THREE.InstancedMesh>(null);
   useEffect(() => {
     const m = ref.current;
@@ -39,7 +42,13 @@ function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; 
     // origin, which hid every container in the level whenever the origin was off-screen.
     m.computeBoundingBox();
     m.computeBoundingSphere();
-  }, [items]);
+    // `material` and `geometry` are deps because they are the mesh's constructor
+    // args: when Auto quality steps down mid-mission the texture tier changes, the
+    // materials are rebuilt, React constructs a NEW InstancedMesh, and a new one
+    // starts with every instance at the origin. Keyed on `items` alone, the whole
+    // site collapsed into one point and vanished on any device that could not hold
+    // its frame rate.
+  }, [items, material, geometry]);
   if (!items.length) return null;
   return (
     <instancedMesh ref={ref} args={[geometry ?? UNIT, material, items.length]} castShadow={cast} receiveShadow />
@@ -47,8 +56,39 @@ function Instanced({ items, material, cast = true, geometry }: { items: Inst[]; 
 }
 
 const UNIT = new THREE.BoxGeometry(1, 1, 1);
+/** A 1x1 white colour map: the surface's colour is then the material's own paint. */
+const FLAT_WHITE = (() => { const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true; return t; })();
+
+/**
+ * The kit's modules carry flat glTF colours: right for the shape, wrong for the site.
+ * Untextured, a pale "cast concrete" under the sun or the night's environment light
+ * read as a white block. Each module's surfaces are dressed with the site's own
+ * textured materials instead (world-scaled, tinted per site and hour, and per
+ * instance where the level paints a container), so a kit barrier is the same
+ * concrete as the wall behind it.
+ */
+const KIT_SURFACE: Record<string, Record<string, string>> = {
+  container: { 'powder coat': 'container', 'machined steel': 'container' },
+  barrier:   { 'cast concrete': 'concrete' },
+  // Kept to the fewest surfaces that still read (each one is a draw, and another in
+  // the shadow pass): a truck is its paint and its running gear, a case and a pump one.
+  case:      { 'powder coat': 'case', 'machined steel': 'case', rubber: 'case' },
+  truck:     { 'powder coat': 'olive', 'reinforced polymer': 'olive', 'phosphated alloy': 'tire', 'machined steel': 'tire', rubber: 'tire' },
+  pump:      { 'powder coat': 'rust', 'phosphated alloy': 'rust', 'machined steel': 'rust' },
+};
+const kitCache = new WeakMap<object, Map<string, THREE.Material[]>>();
+function kitMaterials(module: string, keys: string[], mats: Record<string, THREE.Material>): THREE.Material[] {
+  let byModule = kitCache.get(mats);
+  if (!byModule) { byModule = new Map(); kitCache.set(mats, byModule); }
+  const hit = byModule.get(module);
+  if (hit) return hit;
+  const out = keys.map((k) => mats[k] ?? mats.frame);
+  byModule.set(module, out);
+  return out;
+}
 /** Small or flat pieces whose shadows nobody reads: skipping them keeps the shadow pass cheap. */
-const NO_SHADOW = ['glass', 'panel', 'lampHead', 'redLed', 'screen', 'road', 'yellow', 'steel', 'frame', 'case', 'stripe', 'skirting', 'wood', 'signBar'];
+// Kit cases keep the originals' rule: a knee-high case's shadow is not worth a shadow draw.
+const NO_SHADOW = ['glass', 'panel', 'lampHead', 'redLed', 'screen', 'road', 'yellow', 'steel', 'frame', 'case', 'stripe', 'skirting', 'wood', 'signBar', 'authored_case'];
 const CYL = new THREE.CylinderGeometry(0.5, 0.5, 1, 20);
 const WHEEL = new THREE.CylinderGeometry(0.5, 0.5, 1, 14).rotateZ(Math.PI / 2);
 
@@ -219,33 +259,72 @@ function DeliveryBeacon({ x, z, y }: { x: number; z: number; y: number }) {
   );
 }
 
-export function LevelArt({ level, minimal = false, colourOnly = false, lit = true, night: nightProp, calm = false, cues }: { level: LevelDef; minimal?: boolean; /** Load colour maps only (touch and minimal tiers). */ colourOnly?: boolean; lit?: boolean; night?: boolean; calm?: boolean; /** What the site's economy is doing (lines down, deliveries). */ cues?: WorldCues | null }) {
+export function LevelArt({ level, minimal = false, colourOnly = false, lit = true, night: nightProp, calm = false, cues, terrain = true }: { level: LevelDef; minimal?: boolean; /** Draw the old ring of ridges (the site layer draws its own terrain). */ terrain?: boolean; /** Load colour maps only (touch and minimal tiers). */ colourOnly?: boolean; lit?: boolean; night?: boolean; calm?: boolean; /** What the site's economy is doing (lines down, deliveries). */ cues?: WorldCues | null }) {
   // What the economy says is down or arriving: shown, never invented.
   const idle = useMemo(() => idleProps(level, cues), [level, cues]);
   const delivering = isDelivering(cues);
   // Night look (glowing windows, cool lamps) follows the hour, not the map.
   const night = nightProp ?? level.id === 'blacksite';
+  const kit = useGLTF('/models/production/modular-kit.glb');
+  // One geometry group per SCENE material, not per glTF material: surfaces that dress
+  // to the same site material are merged, so a truck is four draws rather than five
+  // (and twice that again in the shadow pass).
+  const modules = useMemo(() => {
+    const out: Record<string, { geometry: THREE.BufferGeometry; keys: string[] }> = {};
+    for (const name of Object.keys(KIT_SURFACE)) {
+      const group = kit.scene.getObjectByName(name);
+      if (!group) continue;
+      const byKey = new Map<string, THREE.BufferGeometry[]>();
+      group.updateMatrixWorld(true);
+      group.traverse((o) => {
+        if (!(o instanceof THREE.Mesh)) return;
+        const key = KIT_SURFACE[name][(o.material as THREE.Material).name] ?? 'frame';
+        const g = o.geometry.clone();
+        if (!byKey.has(key)) byKey.set(key, []);
+        byKey.get(key)!.push(g);
+      });
+      const keys = [...byKey.keys()];
+      const parts = keys.map((k) => mergeGeometries(byKey.get(k)!, false)).filter((g): g is THREE.BufferGeometry => !!g);
+      const geometry = mergeGeometries(parts, true);
+      byKey.forEach((gs) => gs.forEach((g) => g.dispose()));
+      parts.forEach((g) => g.dispose());
+      if (geometry && parts.length === keys.length) out[name] = { geometry, keys };
+    }
+    return out;
+  }, [kit.scene]);
+  useEffect(() => () => Object.values(modules).forEach((m) => m.geometry.dispose()), [modules]);
   const corrugated = usePbr('corrugated_iron_02', [1, 1], HANGAR, colourOnly);
   const plate = usePbr('metal_plate', [1, 1], HANGAR, colourOnly);
   const concrete = usePbr('concrete_floor_worn_001', [1, 1], HANGAR, colourOnly);
+  const asphalt = usePbr('asphalt_02', [1, 1], HANGAR, colourOnly);
   const plaster = usePbr('damaged_plaster', [1, 1], undefined, colourOnly);
   const planks = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
 
   const mats = useMemo(() => {
-    const tri = (maps: { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture }, o: THREE.MeshStandardMaterialParameters) =>
-      new THREE.MeshStandardMaterial({ ...maps, ...o });
+    // World-scaled, at each texture's real size: the corrugated sheet and the plate
+    // photograph about 2.5-3 m of surface, and tiled at 1.5 m their rust patches
+    // repeated into a camouflage pattern across every long wall.
+    const tri = (maps: { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture }, o: THREE.MeshStandardMaterialParameters, metres = 1.5) =>
+      makeTriplanarMaterial(maps, o, { metresPerTile: metres, detail: minimal ? 0 : 5.3, detailAmount: 0.3, macro: minimal ? 0 : 0.17, macroAmount: 0.25 });
+    // Painted surfaces: the texture's relief and wear (normal and roughness maps) under a
+    // flat paint colour. Some photos' own colour is high-contrast patches (rust on the
+    // corrugated sheet, brick through plaster), and over a 20 m wall any tiling of them
+    // repeats into a camouflage pattern.
+    const painted = (maps: { map: THREE.Texture; normalMap: THREE.Texture; roughnessMap: THREE.Texture }) => ({ ...maps, map: FLAT_WHITE });
     const link = chainLink();
     link.repeat.set(1, 1);
     return {
-      container: tri(corrugated, { color: '#ffffff', roughness: 0.7, metalness: 0.35 }),
+      container: tri(painted(corrugated), { color: '#c9c4bb', roughness: 0.7, metalness: 0.35 }, 2.6),
       frame: new THREE.MeshStandardMaterial({ color: '#2a2b2d', roughness: 0.6, metalness: 0.6 }),
-      warehouse: tri(corrugated, { color: '#b8b2a6', roughness: 0.75, metalness: 0.3 }),
+      warehouse: tri(painted(corrugated), { color: '#8e8a82', roughness: 0.75, metalness: 0.3 }, 2.8),
       stripe: new THREE.MeshStandardMaterial({ color: '#8f2a20', roughness: 0.7 }),
       concrete: tri(concrete, { color: night ? '#7d828a' : '#b0a99c', roughness: 0.92 }),
       facade: tri(concrete, { color: '#8a8f98', roughness: 0.85 }),
-      interior: tri(plaster, { color: '#c9ccd0', roughness: 0.95 }),
+      // A concrete render. The damaged-plaster photo is cream with brick showing through,
+      // which tiled down a corridor read as camouflage; flat paint read as a white box.
+      interior: tri(concrete, { color: night ? '#6f737a' : '#8c8b86', roughness: 0.95 }, 2.4),
       skirting: new THREE.MeshStandardMaterial({ color: '#2b2f36', roughness: 0.8 }),
-      steel: tri(plate, { color: '#5b6068', roughness: 0.5, metalness: 0.75 }),
+      steel: tri(plate, { color: '#5b6068', roughness: 0.5, metalness: 0.75 }, 2.4),
       olive: new THREE.MeshStandardMaterial({ color: '#4f5a3c', roughness: 0.75, metalness: 0.2 }),
       tarp: new THREE.MeshStandardMaterial({ color: '#5e5f42', roughness: 0.95 }),
       tire: new THREE.MeshStandardMaterial({ color: '#141414', roughness: 0.9 }),
@@ -255,16 +334,18 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       // Refinery tanks are smooth painted steel, not tread plate.
       tank: level.id === 'cinder_yard'
         ? new THREE.MeshStandardMaterial({ color: '#a9a69c', roughness: 0.55, metalness: 0.35 })
-        : tri(plate, { color: '#c8c3b8', roughness: 0.45, metalness: 0.6 }),
-      rust: tri(plate, { color: '#7a4a32', roughness: 0.7, metalness: 0.45 }),
+        : tri(plate, { color: '#c8c3b8', roughness: 0.45, metalness: 0.6 }, 2.4),
+      rust: tri(plate, { color: '#7a4a32', roughness: 0.7, metalness: 0.45 }, 2.4),
       pipe: new THREE.MeshStandardMaterial({ color: '#6b6e72', roughness: 0.45, metalness: 0.7 }),
       hazard: new THREE.MeshStandardMaterial({ color: '#c9a227', roughness: 0.6 }),
       fence: new THREE.MeshStandardMaterial({ map: link, transparent: true, alphaTest: 0.35, side: THREE.DoubleSide, roughness: 0.6, metalness: 0.5, color: '#9a9a96' }),
       desk: new THREE.MeshStandardMaterial({ color: '#d7d9dc', roughness: 0.5 }),
       screen: new THREE.MeshStandardMaterial({ color: '#000', emissive: '#58c6ff', emissiveIntensity: 1.6 }),
       server: new THREE.MeshStandardMaterial({ map: ledTexture(), emissive: '#ffffff', emissiveMap: ledTexture(), emissiveIntensity: 1.2, roughness: 0.4, metalness: 0.5 }),
-      roof: tri(corrugated, { color: '#6d6a64', roughness: 0.8, metalness: 0.3, side: THREE.DoubleSide }),
-      road: new THREE.MeshStandardMaterial({ color: '#2f2d2b', roughness: 0.85 }),
+      roof: tri(corrugated, { color: '#6d6a64', roughness: 0.8, metalness: 0.3, side: THREE.DoubleSide }, 2.8),
+      // Roads were an untextured dark slab, the largest flat surface in view at the
+      // Dustline and Cinder Yard gates. Real asphalt (CC0), at a road's coarse grain.
+      road: makeTriplanarMaterial(asphalt, { color: night ? '#77797e' : '#8f8a84', roughness: 0.95 }, { metresPerTile: 3.2, detail: minimal ? 0 : 7.1, detailAmount: 0.35, macro: minimal ? 0 : 0.07, macroAmount: 0.35 }),
       yellow: new THREE.MeshStandardMaterial({ color: '#c99b2a', roughness: 0.8 }),
       lampHead: new THREE.MeshStandardMaterial({ color: '#000', emissive: night ? '#d8e6ff' : '#ffbe73', emissiveIntensity: 4 }),
       panel: new THREE.MeshStandardMaterial({ color: '#000', emissive: '#e8f0ff', emissiveIntensity: 2.2 }),
@@ -274,7 +355,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       signBar: new THREE.MeshBasicMaterial({ color: '#ffffff' }),
       mattress: new THREE.MeshStandardMaterial({ color: '#cfd6dc', roughness: 0.9 }),
     };
-  }, [corrugated, plate, concrete, plaster, planks, night, level.id]);
+  }, [corrugated, plate, concrete, asphalt, plaster, planks, night, level.id, minimal]);
 
   const parts = useMemo(() => {
     const out: Record<string, Inst[]> = {};
@@ -288,12 +369,14 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       const fwd = (t: number): [number, number] => (alongZ ? [x, z + t] : [x + t, z]);
       switch (b.kind) {
         case 'container': {
+          if (!minimal) { add('authored_container', { x, y: h / 2, z, sx: w, sy: h, sz: d, color: b.color }); break; }
           add('container', { x, y: h / 2, z, sx: w, sy: h, sz: d, color: b.color });
           if (h > 3) add('frame', { x, y: h / 2, z, sx: w + 0.04, sy: 0.08, sz: d + 0.04 }); // stack seam
           add('frame', { x, y: h - 0.05, z, sx: w + 0.06, sy: 0.1, sz: d + 0.06 });
           break;
         }
         case 'truck': {
+          if (!minimal) { add('authored_truck', { x, y: h / 2, z, sx: wid, sy: h, sz: len, ry }); break; }
           const [cx, cz] = fwd(len / 2 - 1.1);
           add('olive', { x: cx, y: 1.45, z: cz, sx: wid, sy: 1.6, sz: 2, ry });            // cab
           add('glass', { x: cx, y: 1.85, z: cz + (alongZ ? 1.01 : 0), sx: alongZ ? wid * 0.9 : 0.04, sy: 0.55, sz: alongZ ? 0.04 : wid * 0.9 }); // windscreen
@@ -312,6 +395,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           { const [ax, az] = fwd(0); add('steel', { x: ax, y: h, z: az, sx: alongZ ? 0.05 : len, sy: 0.05, sz: alongZ ? len : 0.05 }); }
           break;
         case 'barrier':
+          if (!minimal) { add('authored_barrier', { x, y: h / 2, z, sx: wid, sy: h, sz: len, ry }); break; }
           add('concrete', { x, y: 0.22, z, sx: w, sy: 0.44, sz: d });
           add('concrete', { x, y: h * 0.7, z, sx: alongZ ? w * 0.45 : w, sy: h * 0.6, sz: alongZ ? d : d * 0.45 });
           break;
@@ -337,6 +421,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           add('wood', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           break;
         case 'case':
+          if (!minimal) { add('authored_case', { x, y: h / 2, z, sx: w, sy: h, sz: d }); break; }
           add('case', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           add('frame', { x, y: h * 0.75, z, sx: w + 0.02, sy: 0.06, sz: d + 0.02 });
           break;
@@ -392,6 +477,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           }
           break;
         case 'pump':
+          if (!minimal) { add('authored_pump', { x, y: h / 2, z, sx: w, sy: h, sz: d }); break; }
           // A pump skid: a base, the motor and the pump casing.
           add('steel', { x, y: 0.15, z, sx: w, sy: 0.3, sz: d });
           add('rust', { x: x - w * 0.2, y: 0.75, z, sx: w * 0.45, sy: 0.9, sz: d * 0.7 });
@@ -518,7 +604,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       }
     }
     return out;
-  }, [level]);
+  }, [level, minimal]);
 
   const beacons = level.art.filter((a) => a.kind === 'beacon');
   const floods = level.art.filter((a) => a.kind === 'floodlight');
@@ -527,9 +613,10 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
 
   return (
     <group>
-      <Mountains color={night ? '#0b1220' : level.id === 'cinder_yard' ? '#4a3426' : '#5a3f30'} />
+      {terrain && <Mountains color={night ? '#0b1220' : level.id === 'cinder_yard' ? '#4a3426' : '#5a3f30'} />}
       {Object.entries(parts).map(([k, items]) =>
-        k === 'tankCyl' ? <Instanced key={k} items={items} material={mats.tank} geometry={CYL} cast={cast} />
+        k.startsWith('authored_') && modules[k.slice(9)] ? <Instanced key={k} items={items} material={kitMaterials(k.slice(9), modules[k.slice(9)].keys, mats)} geometry={modules[k.slice(9)].geometry} cast={cast && !NO_SHADOW.includes(k)} />
+        : k === 'tankCyl' ? <Instanced key={k} items={items} material={mats.tank} geometry={CYL} cast={cast} />
         : k === 'pipeCyl' ? <Instanced key={k} items={items} material={mats.pipe} geometry={CYL} cast={cast} />
         : k === 'drumCyl' ? <Instanced key={k} items={items} material={mats.drum} geometry={CYL} cast={cast} />
         : k === 'hazardCyl' ? <Instanced key={k} items={items} material={mats.hazard} geometry={CYL} cast={false} />

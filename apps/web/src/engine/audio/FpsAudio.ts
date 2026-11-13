@@ -114,6 +114,7 @@ export class FpsAudio {
   private interactBus!: GainNode;
   /** Ducking stages: a bus's level is its mix gain; a duck is a temporary dip on top, so the two never fight. */
   private combatDuck!: GainNode;
+  private combatEq!: BiquadFilterNode;
   private ambDuck!: GainNode;
   private musicDuck!: GainNode;
   private interactDuck!: GainNode;
@@ -192,9 +193,9 @@ export class FpsAudio {
       this.ctx = ctx;
 
       this.limiter = ctx.createDynamicsCompressor();
-      this.limiter.threshold.value = -6;
+      this.limiter.threshold.value = -9;
       this.limiter.ratio.value = 12;
-      this.limiter.attack.value = 0.003;
+      this.limiter.attack.value = 0.001;   // gunshot transients slipped through 3 ms and peaked over 0 dBFS
       this.limiter.release.value = 0.18;
       this.limiter.connect(ctx.destination);
 
@@ -206,8 +207,11 @@ export class FpsAudio {
       this.impactBus = ctx.createGain();
       this.uiBus = ctx.createGain();
       this.ambBus = ctx.createGain();
-      this.gunBus.gain.value = 0.9;
-      this.impactBus.gain.value = 0.9;
+      // Measured (probe-audio-record): a firefight ran at -9 LUFS with true peaks over
+      // 0 dBFS, 22 LU above the site, almost all of it below 150 Hz. Quieter buses and a
+      // low shelf on the way to the master bring it to about -17 LUFS with headroom.
+      this.gunBus.gain.value = GUN_LEVEL;
+      this.impactBus.gain.value = IMPACT_LEVEL;
       this.uiBus.gain.value = 0.8;
       this.ambBus.gain.value = this.ambTarget;
       this.voiceBus = ctx.createGain();
@@ -221,7 +225,10 @@ export class FpsAudio {
       // bus -> (duck stage) -> master. UI and radio are never ducked.
       this.gunBus.connect(this.combatDuck);
       this.impactBus.connect(this.combatDuck);
-      this.combatDuck.connect(this.master);
+      this.combatEq = ctx.createBiquadFilter();
+      this.combatEq.type = 'lowshelf'; this.combatEq.frequency.value = 160; this.combatEq.gain.value = -9;
+      const combatHp = ctx.createBiquadFilter(); combatHp.type = 'highpass'; combatHp.frequency.value = 32;
+      this.combatDuck.connect(this.combatEq).connect(combatHp).connect(this.master);
       this.envBus = ctx.createGain();
       this.envBus.gain.value = this.mix.ambience;
       this.ambBus.connect(this.ambDuck); this.envBus.connect(this.ambDuck); this.ambDuck.connect(this.master);
@@ -249,6 +256,8 @@ export class FpsAudio {
       this.applySpace();
       // the sounds of the site, on the Environment channel
       this.soundscape = new SoundscapeRunner(ctx, this.envBus, (s) => this.noise(s), (key, pri, ms) => this.allow(key, 'environment', pri, ms));
+      // a level set before the first gesture gets its air now that there is a graph
+      queueMicrotask(() => { if (this.level && !this.air) this.applyAir(); });
       this.soundscape.setLevel(this.level, this.scapeState());
       this.applyMix();
       // The score only runs while it can be heard: a muted music slider costs nothing.
@@ -313,6 +322,7 @@ export class FpsAudio {
     if (inside !== this.indoors) this.indoors = inside;
     this.applySpace();
     this.soundscape?.setLevel(level, this.scapeState());
+    this.applyAir();
   }
 
   /** Fade the reverb to the space the listener is in. */
@@ -381,6 +391,7 @@ export class FpsAudio {
 
   dispose(): void {
     this.setExtraction(false);
+    this.stopAir();
     this.soundscape?.dispose();
     this.soundscape = null;
     this.music?.dispose();
@@ -783,8 +794,22 @@ export class FpsAudio {
       o.start();
       return o;
     });
-    gain.gain.setTargetAtTime(1, ctx.currentTime, 2.2); // it arrives slowly, like something approaching
-    this.extractHum = { oscs, gain };
+    gain.gain.setTargetAtTime(1, ctx.currentTime, 4.5); // it arrives slowly, like something approaching
+    // The low hum alone sat inside the site's rumble (measured: extraction only ~4 LU over
+    // the soundscape). A rotor chop in the mids, quickening and growing over ten seconds,
+    // is what you actually hear coming.
+    const chop = ctx.createBufferSource();
+    chop.buffer = this.flatNoise(2); chop.loop = true;
+    const cb = ctx.createBiquadFilter(); cb.type = 'bandpass'; cb.frequency.value = 520; cb.Q.value = 0.9;
+    const am = ctx.createGain(); am.gain.value = 0.5;
+    const rotor = ctx.createOscillator(); rotor.type = 'square';
+    rotor.frequency.setValueAtTime(7, ctx.currentTime); rotor.frequency.linearRampToValueAtTime(12.5, ctx.currentTime + 10);
+    const depth = ctx.createGain(); depth.gain.value = 0.5;
+    rotor.connect(depth).connect(am.gain);
+    const cg = ctx.createGain(); cg.gain.setValueAtTime(0.0001, ctx.currentTime); cg.gain.exponentialRampToValueAtTime(2.4, ctx.currentTime + 10);
+    chop.connect(cb).connect(am).connect(cg).connect(this.envBus ?? this.ambBus);
+    chop.start(); rotor.start();
+    this.extractHum = { oscs: [...oscs, rotor, chop as unknown as OscillatorNode], gain };
   }
 
   /** Dry hammer click on an empty magazine. */
@@ -798,22 +823,139 @@ export class FpsAudio {
    * without a recording land on the signature + subtitle alone, exactly as the
    * story system was designed to degrade.
    */
-  vo(id: string, speaker: Speaker): void {
+  vo(id: string, speaker: Speaker, seconds = 2.6): void {
     // The static + duck need the WebAudio graph, but the recording does not —
     // never let a missing context swallow a line.
+    const dur = Math.max(1.2, Math.min(7, seconds));
     if (this.ctx) {
       this.radioSignature(speaker);
-      this.radioDuck(1.8);
+      this.radioDuck(dur + 0.3);
     }
-    // A contract's own lines are written per mission and never have a recording.
-    if (id.startsWith('dyn-')) return;
+    // No recording (a contract's own lines never have one): the channel still carries
+    // a voice for the length of the line, so the radio sounds like someone talking
+    // while the subtitle says what. No invented words: the murmur is unintelligible.
+    if (id.startsWith('dyn-')) { this.radioMurmur(speaker, dur); return; }
     const known = this.voAvailable.get(id);
-    if (known === false) return;
+    if (known === false) { this.radioMurmur(speaker, dur); return; }
     if (known === true) { this.playVoFile(id); return; }
     // HEAD first: a 404 here is quiet, an <audio> 404 spams the console.
     fetch(`/vo/${id}.mp3`, { method: 'HEAD' })
-      .then((r) => { this.voAvailable.set(id, r.ok); if (r.ok) this.playVoFile(id); })
-      .catch(() => this.voAvailable.set(id, false));
+      .then((r) => { this.voAvailable.set(id, r.ok); if (r.ok) this.playVoFile(id); else this.radioMurmur(speaker, dur); })
+      .catch(() => { this.voAvailable.set(id, false); this.radioMurmur(speaker, dur); });
+  }
+
+  /**
+   * A transmission with no recording behind it: carrier hiss, a speech-shaped murmur
+   * (a pitched buzz through two formant filters that jump per syllable, gated in
+   * syllables and phrases) and a squelch tail. Per speaker: Vanguard low and clipped,
+   * the Ashen Compact harsh and overdriven, Halcyon clean and narrow, Vex quick and
+   * loose, the handler close and warm. Band-limited to a radio's 300 Hz to 3.4 kHz.
+   */
+  private radioMurmur(speaker: Speaker, seconds: number): void {
+    const ctx = this.ctx;
+    const bus = this.voiceBus ?? this.uiBus;
+    if (!ctx || !bus) return;
+    const v = MURMUR[speaker] ?? MURMUR.handler;
+    const t0 = ctx.currentTime + 0.08, t1 = t0 + seconds;
+    // carrier hiss under the whole transmission
+    const hiss = ctx.createBufferSource();
+    hiss.buffer = this.flatNoise(seconds + 0.2);
+    const hb = ctx.createBiquadFilter(); hb.type = 'bandpass'; hb.frequency.value = 1800; hb.Q.value = 0.6;
+    const hg = ctx.createGain();
+    hg.gain.setValueAtTime(0.0001, t0); hg.gain.linearRampToValueAtTime(v.hiss, t0 + 0.04)
+    hg.gain.setValueAtTime(v.hiss, t1); hg.gain.linearRampToValueAtTime(0.0001, t1 + 0.06);
+    hiss.connect(hb).connect(hg).connect(bus);
+    hiss.start(t0); hiss.stop(t1 + 0.1);
+    // the voice: a buzz at the speaker's pitch, with a little drift
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(v.f0, t0);
+    const f1 = ctx.createBiquadFilter(); f1.type = 'bandpass'; f1.Q.value = 2.5;
+    const f2 = ctx.createBiquadFilter(); f2.type = 'bandpass'; f2.Q.value = 3.5;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 300;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = v.top;
+    const shaper = ctx.createWaveShaper(); shaper.curve = driveCurve(v.drive);
+    const env = ctx.createGain(); env.gain.value = 0;
+    // measured: at the first level the murmur lost the voice band to the fight it sat in
+    const out = ctx.createGain(); out.gain.value = v.level * 1.3;
+    // two formant paths summed, then the radio's band and grit
+    const sum = ctx.createGain();
+    osc.connect(f1).connect(sum); osc.connect(f2).connect(sum);
+    sum.connect(env).connect(shaper).connect(hp).connect(lp).connect(out).connect(bus);
+    // syllables: random vowel formants, gated with short gaps; phrases break every ~1 s
+    const VOWELS: [number, number][] = [[730, 1090], [530, 1840], [270, 2290], [570, 840], [300, 870], [440, 1020], [660, 1720]];
+    let t = t0, inPhrase = 0;
+    while (t < t1 - 0.12) {
+      const len = v.syl * (0.7 + Math.random() * 0.6);
+      const [a, b] = VOWELS[Math.floor(Math.random() * VOWELS.length)];
+      f1.frequency.setValueAtTime(a * v.formant, t); f2.frequency.setValueAtTime(b * v.formant, t);
+      osc.frequency.setValueAtTime(v.f0 * (0.9 + Math.random() * 0.25), t);
+      const peak = 0.55 + Math.random() * 0.45;
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(peak, t + 0.025);
+      env.gain.setValueAtTime(peak * 0.8, t + len * 0.7);
+      env.gain.linearRampToValueAtTime(0, t + len);
+      inPhrase += len;
+      t += len + (inPhrase > 0.9 + Math.random() * 0.6 ? (inPhrase = 0, 0.18 + Math.random() * 0.2) : 0.02 + Math.random() * 0.05);
+    }
+    osc.start(t0); osc.stop(t1 + 0.05);
+    // squelch tail as the key is released
+    this.noiseBand(v.tail, 0.12, 0.11, t1 + 0.02 - ctx.currentTime);
+  }
+
+  /**
+   * Each site's own air above the rumble (measured: the three soundscapes were within
+   * 1-3 dB of each other in every band, nearly all below 800 Hz). Dustline: wind that
+   * gusts through the mids. The Blacksite: ventilation hiss and a mains/HVAC hum. Cinder
+   * Yard: an industrial roar in the low mids with pressure hiss. On the Environment bus.
+   */
+  private applyAir(): void {
+    this.stopAir();
+    const ctx = this.ctx, id = this.level?.id;
+    if (!ctx || !this.envBus || !id) return;
+    const nodes: AudioScheduledSourceNode[] = [];
+    const out = ctx.createGain(); out.gain.value = 0; out.connect(this.envBus);
+    out.gain.setTargetAtTime(1, ctx.currentTime, 1.5);
+    const band = (freq: number, q: number, vol: number, lfoHz = 0, lfoDepth = 0, type: BiquadFilterType = 'bandpass') => {
+      const src = ctx.createBufferSource(); src.buffer = this.flatNoise(4); src.loop = true;
+      const f = ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+      const g = ctx.createGain(); g.gain.value = vol;
+      src.connect(f).connect(g).connect(out); src.start(); nodes.push(src);
+      if (lfoHz) { const l = ctx.createOscillator(); l.frequency.value = lfoHz; const d = ctx.createGain(); d.gain.value = lfoDepth; l.connect(d).connect(g.gain); l.start(); nodes.push(l) }
+    };
+    const hum = (freq: number, vol: number) => { const o = ctx.createOscillator(); o.frequency.value = freq; const g = ctx.createGain(); g.gain.value = vol; o.connect(g).connect(out); o.start(); nodes.push(o) };
+    if (id === 'dustline_depot') { band(650, 0.7, 0.06, 0.07, 0.045); band(1300, 0.7, 0.05, 0.09, 0.04); band(2600, 0.8, 0.018, 0.11, 0.014); band(3600, 0.5, 0.004, 0.05, 0.003, 'highpass') }
+    else if (id === 'blacksite') { band(3600, 0.5, 0.035); band(900, 1.2, 0.01, 0.2, 0.004); hum(120, 0.012); hum(240, 0.006) }
+    else { band(420, 0.6, 0.05, 0.3, 0.012); band(4200, 0.6, 0.009, 0.15, 0.004); hum(98, 0.008) }
+    this.air = { nodes, out };
+  }
+
+  private stopAir(): void {
+    const a = this.air, ctx = this.ctx;
+    this.air = null;
+    if (!a || !ctx) return;
+    a.out.gain.setTargetAtTime(0, ctx.currentTime, 0.3);
+    setTimeout(() => a.nodes.forEach((n) => { try { n.stop(); } catch { /* stopped */ } }), 1500);
+  }
+  private air: { nodes: AudioScheduledSourceNode[]; out: GainNode } | null = null;
+
+  /** The final mix (after the limiter) as a stream, for recording what a player hears. */
+  captureStream(): MediaStream | null {
+    const ctx = this.ctx
+    if (!ctx || !this.limiter || typeof ctx.createMediaStreamDestination !== 'function') return null
+    if (!this.capture) { this.capture = ctx.createMediaStreamDestination(); this.limiter.connect(this.capture) }
+    return this.capture.stream
+  }
+  private capture: MediaStreamAudioDestinationNode | null = null
+
+  /** Steady white noise (the decaying `noise` is for one-shots). */
+  private flatNoise(seconds: number): AudioBuffer {
+    const ctx = this.ctx!;
+    const len = Math.max(1, Math.floor(ctx.sampleRate * seconds));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return buf;
   }
 
   private voAvailable = new Map<string, boolean>();
@@ -854,10 +996,10 @@ export class FpsAudio {
     }
   }
 
-  private noiseBand(freq: number, dur: number, vol: number): void {
+  private noiseBand(freq: number, dur: number, vol: number, delay = 0): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    const now = ctx.currentTime;
+    const now = ctx.currentTime + Math.max(0, delay);
     const src = ctx.createBufferSource();
     src.buffer = this.noise(dur);
     const bp = ctx.createBiquadFilter();
@@ -1203,8 +1345,8 @@ export class FpsAudio {
     const t = ctx.currentTime;
     const set = (g: GainNode | undefined, v: number) => g?.gain.setTargetAtTime(v, t, 0.05);
     set(this.master, this.backgroundMuted ? 0 : this.mix.master);
-    set(this.gunBus, 0.9 * this.mix.effects);
-    set(this.impactBus, 0.9 * this.mix.effects);
+    set(this.gunBus, GUN_LEVEL * this.mix.effects);
+    set(this.impactBus, IMPACT_LEVEL * this.mix.effects);
     set(this.uiBus, this.mix.ui);
     set(this.interactBus, this.mix.interactions);
     set(this.voiceBus, this.mix.voice);
@@ -1317,7 +1459,7 @@ export class FpsAudio {
    *  tone eases back, so the voice is clear and the world is still there. */
   private radioDuck(seconds: number): void {
     this.dip(this.musicDuck, 0.55, seconds);
-    this.dip(this.combatDuck, 0.35, seconds);
+    this.dip(this.combatDuck, 0.6, seconds);
     this.dip(this.interactDuck, 0.3, seconds);
     this.duck(0.5, seconds);
   }
@@ -1365,3 +1507,28 @@ export class FpsAudio {
     return buf;
   }
 }
+
+/** How each speaker's murmur sounds: pitch, syllable length, formant shift, grit, level. */
+const MURMUR: Record<Speaker, { f0: number; syl: number; formant: number; drive: number; top: number; hiss: number; level: number; tail: number }> = {
+  handler: { f0: 185, syl: 0.17, formant: 1.05, drive: 1.5, top: 3400, hiss: 0.012, level: 0.42, tail: 1900 },
+  vanguard: { f0: 104, syl: 0.15, formant: 0.92, drive: 2, top: 3000, hiss: 0.014, level: 0.46, tail: 520 },
+  ashen: { f0: 118, syl: 0.19, formant: 0.95, drive: 6, top: 3200, hiss: 0.022, level: 0.4, tail: 760 },
+  halcyon: { f0: 175, syl: 0.16, formant: 1.08, drive: 1.1, top: 3400, hiss: 0.006, level: 0.38, tail: 2800 },
+  vex: { f0: 142, syl: 0.13, formant: 1.0, drive: 3, top: 3300, hiss: 0.016, level: 0.42, tail: 1150 },
+};
+
+/** A soft-clip curve: 1 is clean, higher is grittier. */
+function driveCurve(k: number): Float32Array<ArrayBuffer> {
+  const n = 1024, c = new Float32Array(new ArrayBuffer(n * 4));
+  for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
+  return c;
+}
+
+/**
+ * The combat buses' base levels, under the Effects slider. Measured with
+ * probe-audio-record/analyze: at 0.9 the player's rifle alone drove the limiter flat
+ * (about -12 LUFS, true peak over 0 dBFS) and a firefight sat 18-20 LU over the site.
+ * Both the constructor and applyMix use these: applyMix used to reset them to 0.9.
+ */
+const GUN_LEVEL = 0.37
+const IMPACT_LEVEL = 0.45

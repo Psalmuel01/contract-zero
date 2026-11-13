@@ -5,7 +5,7 @@
 // itself when its next turn is logged; until then it says it is waiting.
 
 import { useQuery } from '@tanstack/react-query'
-import { api, type MissionResult } from '@/lib/api'
+import { api, type AIReview, type MissionResult } from '@/lib/api'
 import { describeConsequence, type StepState } from '@/lib/presenter/consequence'
 
 const MARK: Record<StepState, { glyph: string; cls: string; label: string }> = {
@@ -22,7 +22,7 @@ export function ConsequencePanel({ session, result }: { session: string; result:
     queryKey: ['aftermath', session],
     queryFn: () => api.aftermath(session),
     enabled: settled,
-    refetchInterval: (q) => ((q.state.data?.decisions.length ?? 0) > 0 ? false : 10_000),
+    refetchInterval: (q) => ((q.state.data?.ai_reviews?.length ?? 0) > 0 || (q.state.data?.ai_configured === false && (q.state.data?.decisions.length ?? 0) > 0) ? false : 5_000),
   })
   const story = describeConsequence(result, c, after.data)
   return (
@@ -41,6 +41,15 @@ export function ConsequencePanel({ session, result }: { session: string; result:
           </li>
         ))}
       </ol>
+      {settled && result.outcome === 'extracted' && (
+        <div className="mt-5 border-t border-line pt-4" data-testid="ai-aftermath">
+          <h3 className="cz-label text-amber-hi">Your operation → command response</h3>
+          <p className="mt-2 text-sm text-muted">You {result.kind === 'sabotage' ? 'destroyed' : result.kind === 'recovery' ? 'recovered' : 'extracted'} {result.extracted_units} {result.resource} at {result.site?.name ?? c?.before.name ?? result.target}.</p>
+          {after.isError ? <p className="mt-2 text-sm text-amber-hi">Could not load the response. Retrying…</p>
+            : after.data?.ai_reviews?.length ? after.data.ai_reviews.map((review) => <AIResponse key={review.seq} review={review} />)
+            : <p className="mt-2 text-sm text-muted">{after.data?.ai_configured === false ? 'AI planning is off. Routine faction decisions continue above.' : 'Awaiting the faction’s AI review. Events during a cooldown are grouped; this report updates automatically.'}</p>}
+        </div>
+      )}
       {c && (
         <details className="mt-3 text-xs text-muted">
           <summary className="cursor-pointer text-steel hover:text-fog">Advanced evidence (recorded snapshots)</summary>
@@ -49,4 +58,28 @@ export function ConsequencePanel({ session, result }: { session: string; result:
       )}
     </section>
   )
+}
+
+const ACTION_LABEL: Record<string, string> = {
+  request_supplies: 'Request supplies', trade: 'Trade supplies', post_bounty: 'Post a bounty',
+  configure_defense: 'Change defenses', seize_convoy: 'Seize a convoy', set_margin: 'Adjust pricing',
+  post_sabotage: 'Sponsor sabotage', none: 'Hold position',
+}
+
+export function AIResponse({ review }: { review: AIReview }) {
+  const { payload: p } = review
+  if (!p.ok || p.outcome?.error) return <p className="mt-2 text-sm text-amber-hi">The AI review failed. Routine policies continue; no AI response is confirmed for this review.</p>
+  return <div className="mt-3 border-l-2 border-amber pl-3">
+    <p className="text-xs text-steel">AI review recorded · world hour {review.tick} · your operation was included in this review</p>
+    {p.outcome?.assessment && <p className="mt-1 text-sm text-fog">{p.outcome.assessment}</p>}
+    <ul className="mt-2 space-y-1 text-sm">
+      {p.outcome?.results?.map((r, i) => <li key={i}>
+        <span className={r.validation === 'accepted' ? 'text-friendly' : 'text-muted'}>{ACTION_LABEL[r.type] ?? r.type}: {r.validation === 'accepted' ? 'executed by the economy' : r.validation === 'no_action' ? 'no additional action' : 'rejected'}</span>
+        {r.error && <span className="text-muted"> — {r.error}</span>}
+        {r.rationale && <p className="mt-0.5 text-xs text-muted">Command’s rationale: {r.rationale}</p>}
+      </li>)}
+    </ul>
+    {!p.outcome?.results?.length && <p className="mt-1 text-sm text-muted">No additional moves were recorded.</p>}
+    <p className="mt-2 text-xs text-dim">Accepted moves change the economy; on-chain confirmation is tracked separately. A review may include several world events.</p>
+  </div>
 }

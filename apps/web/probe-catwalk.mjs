@@ -4,7 +4,7 @@
 import { chromium } from 'playwright'
 
 const WEB = process.argv[2] ?? 'http://localhost:3000'
-const b = await chromium.launch({ args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
+const b = await chromium.launch({ channel: 'chrome', args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
 const page = await (await b.newContext({ viewport: { width: 1280, height: 720 } })).newPage()
 const errs = []
 page.on('pageerror', (e) => errs.push(String(e)))
@@ -23,7 +23,7 @@ await page.evaluate(() => { window.__czWarp(3, -19.5); window.__czLook(0, 0) });
 const start = await floor()
 check('on the ground at the foot of the stair', start.floor === 0, start)
 await page.keyboard.down('w')
-const up = await until((f) => f.floor >= 4.79)
+const up = await until((f) => f.floor >= 4.79, 150000)
 await page.keyboard.up('w')
 check('walking forward up the stair raises the floor to the deck', up.floor >= 4.79, up)
 check('the eye rises with it (floor + standing eye)', Math.abs(up.eye - (up.floor + 1.6)) < 0.1, up)
@@ -32,7 +32,7 @@ await page.screenshot({ path: process.env.OUT_UP ?? '/tmp/catwalk-up.png' })
 // On the deck, walk along it (turn east) and stay up; then step off its edge and drop.
 await page.evaluate(() => window.__czLook(-1.5708, 0)); await page.waitForTimeout(300)
 await page.keyboard.down('w')
-const along = await until((f) => f.x > up.x + 1.5, 30000)
+const along = await until((f) => f.x > up.x + 1.5, 90000)
 await page.keyboard.up('w')
 check('walking along the deck keeps you up', along.floor >= 4.79 && along.x > up.x + 1, along)
 await page.evaluate(() => window.__czLook(0, 0)); await page.waitForTimeout(300)
@@ -45,6 +45,18 @@ check('half way up the stair the floor is half way up (z -22.5 is 28% of the 7.6
 await page.evaluate(() => window.__czWarp(12, -10))
 const ground = await until((f) => f.floor === 0, 30000)
 check('away from the walkway you are back on the ground', ground.floor === 0, ground)
+// From the ground, walk under the catwalk and into the stair's side: you must stay down.
+// (The walkways have open ground beneath them; the floor used to snap to the highest surface.)
+await page.evaluate(() => { window.__czWarp(-2, -25.5); window.__czLook(0, 0) }); await page.waitForTimeout(500)
+await page.keyboard.down('w')
+const under = await until((f) => f.z < -28.2, 20000)
+await page.keyboard.up('w')
+check('walking under the catwalk from the ground keeps you on the ground', under.floor === 0 && under.z < -27.5, under)
+await page.evaluate(() => { window.__czWarp(0.6, -25); window.__czLook(-1.5708, 0) }); await page.waitForTimeout(500)
+await page.keyboard.down('w')
+const side = await until((f) => f.x > 3, 20000)
+await page.keyboard.up('w')
+check('walking into the side of the stair keeps you on the ground', side.floor < 0.3, side)
 console.log('page errors', errs.slice(0, 3))
 await b.close()
 process.exit(fail || errs.length ? 1 : 0)

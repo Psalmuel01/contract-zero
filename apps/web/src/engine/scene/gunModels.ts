@@ -38,7 +38,7 @@ const PROCEDURAL_LEN: Record<ProceduralGunId, number> = {
 const PROCEDURAL_IDS = Object.keys(PROCEDURAL_LEN) as ProceduralGunId[];
 
 export const GUN_MODEL_URL: Record<Exclude<GunId, ProceduralGunId>, string> = {
-  assault_rifle: '/models/guns/rifle.glb',
+  assault_rifle: '/models/production/service-carbine.glb',
   legendary: '/models/guns/blaster.glb',
 };
 
@@ -55,7 +55,7 @@ const GUN_LEN: Record<Exclude<GunId, ProceduralGunId>, string | number> = {
  * against the viewmodel.
  */
 const GUN_FIX: Record<Exclude<GunId, ProceduralGunId>, { flipY: boolean; yaw?: number; pitch?: number; roll?: number }> = {
-  assault_rifle: { flipY: true },  // matches the old rifle.ts FLIP
+  assault_rifle: { flipY: false },  // matches the old rifle.ts FLIP
   legendary:     { flipY: true },
 };
 

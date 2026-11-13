@@ -20,8 +20,8 @@ describe('seven channels reach the right buses', () => {
     audio.setMix({ master: 0.5, music: 0, effects: 0.4, voice: 0.3, ambience: 0.2, ui: 0.1, interactions: 0.7 })
     const a = inner(audio)
     expect(gain(a.master).value).toBeCloseTo(0.5)
-    expect(gain(a.gunBus).value).toBeCloseTo(0.9 * 0.4)      // Combat
-    expect(gain(a.impactBus).value).toBeCloseTo(0.9 * 0.4)   // Combat
+    expect(gain(a.gunBus).value).toBeCloseTo(0.37 * 0.4)     // Combat (GUN_LEVEL under the slider)
+    expect(gain(a.impactBus).value).toBeCloseTo(0.45 * 0.4)   // Combat (IMPACT_LEVEL under the slider)
     expect(gain(a.voiceBus).value).toBeCloseTo(0.3)          // Radio
     expect(gain(a.envBus).value).toBeCloseTo(0.2)            // Environment (the site's positional sounds)
     expect(gain(a.uiBus).value).toBeCloseTo(0.1)             // Interface
@@ -56,7 +56,7 @@ describe('radio ducking', () => {
     audio.vo('dyn-test', 'handler')
     const a = inner(audio)
     expect(gain(a.musicDuck).min).toBeCloseTo(0.45)
-    expect(gain(a.combatDuck).min).toBeCloseTo(0.65)
+    expect(gain(a.combatDuck).min).toBeCloseTo(0.4)   // deeper since the voice band measured masked by gunfire
     expect(gain(a.interactDuck).min).toBeCloseTo(0.7)
     expect(gain(a.ambDuck).min).toBeCloseTo(0.5)  // the room is still there
     for (const d of ['musicDuck', 'combatDuck', 'interactDuck']) expect(gain(a[d]).min, d).toBeGreaterThan(0.3)
@@ -310,7 +310,7 @@ describe('every radio voice has its own signature', () => {
       expect(a.voiceBus.inputs, who).toBeGreaterThan(inputs)
       built[who] = (ctx.nodesByKind.source ?? 0) - before
     }
-    expect(built.halcyon).toBe(2)                                    // two narrow bands
+    expect(built.halcyon).toBe(4)                                    // two narrow bands to open, carrier hiss, squelch tail
     expect(new Set(Object.values(built)).size).toBeGreaterThan(1)    // not one signature for everyone
   })
 })
@@ -393,5 +393,15 @@ describe('the audio engine follows the economy\u2019s cues', () => {
     audio.setLevel(cinder, null)
     expect(kinds().has('pump')).toBe(true)
     expect(kinds().has('stack')).toBe(true)
+  })
+})
+
+describe('a radio line with no recording still sounds like a transmission', () => {
+  it('carries a voice-shaped murmur on the radio channel for the length of the line, then closes', () => {
+    const ctx = inner(audio).ctx as FakeAudioContext
+    const osc = ctx.nodesByKind.osc ?? 0, shaper = ctx.nodesByKind.shaper ?? 0
+    audio.vo('dyn-murmur', 'vanguard', 3)
+    expect((ctx.nodesByKind.osc ?? 0) - osc).toBe(1)      // one voice, not a node per syllable
+    expect((ctx.nodesByKind.shaper ?? 0) - shaper).toBe(1) // the radio's grit
   })
 })

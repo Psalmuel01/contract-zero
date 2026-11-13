@@ -12,6 +12,7 @@ import { ReadinessSummary, useReadinessData } from '@/components/world/Readiness
 import { FactionInsignia } from '@/components/ui/FactionInsignia'
 import { factionColor } from '@/lib/factions'
 import { boardView, guardCount, kindsPresent, SORT_LABEL, type KindFilter, type SortKey } from '@/lib/world/board'
+import { BoardTable } from '@/components/world/table/BoardTable'
 
 const PHASE_WORD = { day: 'by day', dusk: 'at dusk', night: 'at night' } as const
 
@@ -52,16 +53,26 @@ export default function ContractBoard() {
   const world = useQuery({ queryKey: ['world'], queryFn: api.world, refetchInterval: 5_000 })
   const [kind, setKind] = useState<KindFilter>('all')
   const [sort, setSort] = useState<SortKey>('pay')
+  const [site, setSite] = useState<string | null>(null)
+  const [looking, setLooking] = useState<string | null>(null)
   const all = world.data?.board ?? []
-  const board = boardView(all, kind, sort)
+  const board = boardView(all, kind, sort).filter((e) => !site || e.site?.id === site)
+  const siteName = site ? all.find((e) => e.site?.id === site)?.site?.name ?? site : null
   const readiness = useReadinessData()
 
   return (
-    <Shell title="Contract Board" back={{ href: '/', label: 'Hub' }}>
+    <Shell wide title="Contract Board" back={{ href: '/', label: 'Hub' }}>
       {world.isError && <p className="text-rose-400">The economy server is not reachable.</p>}
       <div className="mb-4"><WorldClockPanel clock={world.data?.clock} compact /></div>
+      <p className="-mt-2 mb-6 max-w-2xl text-sm leading-relaxed text-muted">Choose an operation, compare the resistance and payout, then review the intel before deploying.</p>
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="min-w-0">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="cz-label">Available operations</h2>
+        <span className="text-xs text-muted">{board.length} contract{board.length === 1 ? '' : 's'}</span>
+      </div>
       {all.length > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2" data-testid="board-controls">
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-y border-line py-3" data-testid="board-controls">
           {kindsPresent(all).length > 2 && <div role="group" aria-label="Contract type" className="flex flex-wrap gap-1">
             {kindsPresent(all).map((k) => (
               <button key={k} type="button" aria-pressed={kind === k} onClick={() => setKind(k)} data-testid={`filter-${k}`} className={`cz-label !text-[11px] border px-3 py-1.5 ${kind === k ? 'border-amber bg-amber/15 !text-amber-hi' : 'border-line hover:border-line-strong'}`}>{k === 'all' ? `All (${all.length})` : `${KIND[k].label} (${all.filter((e) => e.kind === k).length})`}</button>
@@ -74,11 +85,17 @@ export default function ContractBoard() {
           </label>
         </div>
       )}
-      {world.data && board.length === 0 && (
+      {world.data && all.length === 0 && (
         <Panel><p className="text-muted">Nothing on the board right now. Vanguard may be out of fuel to stage a depot, and nobody is paying for anything else.</p></Panel>
       )}
-      {all.length > 0 && board.length === 0 && <Panel><p className="text-muted">No {kind} contracts are open right now. <button className="text-steel underline" onClick={() => setKind('all')}>Show all</button></p></Panel>}
+      {all.length > 0 && board.length === 0 && <Panel><p className="text-muted">No contracts match these filters. <button className="text-steel underline" onClick={() => { setKind('all'); setSite(null) }}>Clear filters</button></p></Panel>}
       <div className="grid gap-3">
+        {site && (
+          <div className="flex items-center gap-2 text-sm" data-testid="board-site-filter">
+            <span className="text-muted">Showing contracts at <b className="text-fog">{siteName}</b></span>
+            <button type="button" onClick={() => setSite(null)} className="min-h-6 border border-line px-2 text-xs text-muted hover:text-fog">All sites</button>
+          </div>
+        )}
         {board.map((e) => {
           const k = KIND[e.kind] ?? KIND.raid
           const phase = world.data?.clock?.conditions.phase
@@ -88,8 +105,9 @@ export default function ContractBoard() {
           const fee = e.bounty?.amount ?? 0
           const g = describeGuardPlan(e.guards, e.target_name)
           return (
-            <section key={`${e.kind}-${e.target}-${e.resource}-${e.site?.id ?? ''}`} className="cz-panel p-4 sm:p-5" data-testid="contract-card" data-kind={e.kind}>
-              <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-center">
+            <section key={`${e.kind}-${e.target}-${e.resource}-${e.site?.id ?? ''}`} className={`cz-panel p-4 sm:p-5 ${looking && looking === e.site?.id ? 'ring-1 ring-amber/50' : ''}`} data-testid="contract-card" data-kind={e.kind}
+              onMouseEnter={() => setLooking(e.site?.id ?? null)} onMouseLeave={() => setLooking(null)} onFocus={() => setLooking(e.site?.id ?? null)}>
+              <div className="grid gap-4">
                 <div className="flex min-w-0 gap-3">
                   <span style={{ color: factionColor(e.target) }} className="hidden shrink-0 sm:block"><FactionInsignia id={e.target} className="h-12 w-12" title={e.target_name} /></span>
                   <div className="min-w-0 flex-1">
@@ -97,7 +115,7 @@ export default function ContractBoard() {
                       <span className={`cz-label !text-[10px] px-2 py-0.5 ${k.badge}`}>{k.label}</span>
                       <span className="cz-label !text-[10px]">{site}</span>
                     </div>
-                    <div className="mt-1.5 font-display text-2xl font-bold uppercase tracking-wide">{k.title(e)}</div>
+                    <div className="mt-2 font-display text-2xl font-bold uppercase tracking-wide">{k.title(e)}</div>
                     <div className="text-sm text-muted">Target: <span style={{ color: factionColor(e.target) }}>{e.target_name}</span> · defense L{e.defense}</div>
                     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
                       <span className="text-fog" data-testid="guard-chip"><b>{guardCount(e)}</b> guard{guardCount(e) === 1 ? '' : 's'}{g.stayedHome > 0 ? <span className="text-amber-hi"> · {g.stayedHome} unarmed</span> : null}</span>
@@ -105,8 +123,8 @@ export default function ContractBoard() {
                     </div>
                   </div>
                 </div>
-                <div className="flex items-center justify-between gap-5 md:flex-col md:items-end">
-                  <div className="flex gap-6 text-right">
+                <div className="flex flex-wrap items-end justify-between gap-4 border-t border-line pt-4">
+                  <div className="flex flex-wrap gap-x-8 gap-y-3">
                     {e.kind === 'raid' && <Stat label="Cargo sells for" value={`${e.market_value.bid} cr`} hint={`${e.market_value.unit_bid} cr/unit at Vex`} />}
                     <Stat label={e.kind === 'raid' ? 'Bounty' : 'Contract fee'} value={fee ? `${fee} cr` : 'none'} hint={e.bounty ? `from ${e.bounty.sponsor_name}` : undefined} />
                   </div>
@@ -123,10 +141,20 @@ export default function ContractBoard() {
           )
         })}
       </div>
+      </div>
+      <aside className="min-w-0 space-y-3 xl:sticky xl:top-4" aria-label="Operations overview">
+        <section className="cz-panel overflow-hidden" data-testid="board-table">
+          <div className="flex items-center justify-between border-b border-line px-4 py-3">
+            <h2 className="cz-label">Operations map</h2>
+            {site && <button type="button" onClick={() => setSite(null)} className="text-xs text-steel hover:text-fog">Reset site</button>}
+          </div>
+          <div className="p-2"><BoardTable world={world.data} board={all} focusSite={looking} picked={site} onPick={setSite} /></div>
+          <p className="border-t border-line px-4 py-3 text-xs leading-relaxed text-muted">Select a site to filter operations. Hover over a contract to locate it on the map.</p>
+        </section>
 
       {world.data && (
-        <Panel title="MARKET (VEX EXCHANGE)" className="mt-6">
-          <div className="grid grid-cols-3 gap-3">
+        <Panel title="Vex Exchange prices">
+          <div className="grid gap-4">
             {world.data.prices.map((p) => (
               <Stat key={p.resource} label={RESOURCE_LABEL[p.resource]} value={`${p.price.bid} / ${p.price.ask} cr`} hint={`bid / ask · Vex holds ${p.stock}`} />
             ))}
@@ -134,6 +162,9 @@ export default function ContractBoard() {
           {world.data.market.insolvent && <p className="mt-3 text-sm text-amber-400">Vex is insolvent and not buying.</p>}
         </Panel>
       )}
+        <Link href="/exchange" className="inline-flex text-xs text-steel hover:text-fog">Open Exchange →</Link>
+      </aside>
+      </div>
     </Shell>
   )
 }

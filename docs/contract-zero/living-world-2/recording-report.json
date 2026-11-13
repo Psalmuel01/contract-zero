@@ -1,0 +1,42 @@
+[
+  {
+    "name": "1-hub",
+    "caption": "HUB: the hangar, the next operation, and what changed since the last look",
+    "audio": true,
+    "seconds": 11.853,
+    "errors": [],
+    "ffmpeg": "ok"
+  },
+  {
+    "name": "2-contracts",
+    "caption": "CONTRACTS: the operations map follows the contract you point at",
+    "audio": true,
+    "seconds": 13.84,
+    "errors": [],
+    "ffmpeg": "ok"
+  },
+  {
+    "name": "3-cinder-yard",
+    "caption": "CINDER YARD, DUSK: raid the Ashen Compact, take the cargo, extract (dev bench, unscored)",
+    "audio": true,
+    "seconds": 40.387,
+    "errors": [],
+    "ffmpeg": "ok"
+  },
+  {
+    "name": "4-war-table",
+    "caption": "WAR TABLE: a real supply order: shortage, competing offers, the winner, delivery",
+    "audio": true,
+    "seconds": 27.674,
+    "errors": [],
+    "ffmpeg": "ok"
+  },
+  {
+    "name": "5-exchange",
+    "caption": "EXCHANGE: two merchants, their real shelves and live prices",
+    "audio": true,
+    "seconds": 10.631,
+    "errors": [],
+    "ffmpeg": "ok"
+  }
+]

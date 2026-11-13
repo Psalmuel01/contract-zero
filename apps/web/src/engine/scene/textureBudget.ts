@@ -9,6 +9,7 @@ export const FIGHT_SETS: PbrSet[] = [
   { dir: 'dustline', base: 'burned_ground_01' }, { dir: 'dustline', base: 'broken_brick_wall' },
   { dir: 'dustline', base: 'damaged_plaster' }, { dir: 'dustline', base: 'black_painted_planks' },
   { dir: 'hangar', base: 'corrugated_iron_02' }, { dir: 'hangar', base: 'metal_plate' }, { dir: 'hangar', base: 'concrete_floor_worn_001' },
+  { dir: 'hangar', base: 'asphalt_02' }, // roads
 ]
 
 export const MAPS_FULL = ['diff', 'nor_gl', 'rough'] as const

@@ -84,7 +84,7 @@ export default function SignIn() {
         )}
 
         {error && <p className="text-sm text-rose-400">{error}</p>}
-        <p className="text-center text-xs text-slate-600"><Link href="/training" className="hover:text-slate-400">Just want to practice? Training needs no account.</Link></p>
+        <p className="text-center text-xs text-muted"><Link href="/training" className="inline-flex min-h-6 items-center hover:text-fog">Just want to practice? Training needs no account.</Link></p>
       </div>
     </Shell>
   )

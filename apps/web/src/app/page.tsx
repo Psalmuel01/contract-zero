@@ -7,38 +7,21 @@ import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { TopBar } from '@/components/ui/Shell'
-import { api, RESOURCE_LABEL, type ActorView, type BoardEntry, type ResourceName } from '@/lib/api'
+import { api, RESOURCE_LABEL, type BoardEntry } from '@/lib/api'
 import { fixedTier, loadSettings, type Quality } from '@/lib/settings'
 import { useProfile, useSession, useStash } from '@/lib/useSession'
 import { useMusicState } from '@/components/audio/AudioProvider'
 import { RadioFeed } from '@/components/audio/RadioFeed'
 import { WorldClockPanel } from '@/components/world/WorldClock'
-import { ReadinessSummary, useReadinessData } from '@/components/world/Readiness'
+import { SinceVisit } from '@/components/hub/SinceVisit'
 import { describeGuardPlan } from '@/lib/presenter/economy'
 import { ICON_COLOR, ResourceIcon, type IconKind } from '@/components/ui/ResourceIcon'
 
 const HangarScene = dynamic(() => import('@/components/hub/HangarScene'), { ssr: false })
 
-const RES: ResourceName[] = ['ammo', 'med', 'fuel']
-
 /** The contract worth taking next: an open bounty first, then the richest cargo. */
 function pickNext(board: BoardEntry[]): BoardEntry | null {
   return [...board].sort((a, b) => (b.bounty?.amount ?? 0) - (a.bounty?.amount ?? 0) || b.market_value.bid - a.market_value.bid)[0] ?? null
-}
-
-function target(a: ActorView, r: ResourceName) {
-  return r === 'ammo' ? a.ammo_target : a.requirement[r]
-}
-
-function Meter({ label, have, want }: { label: string; have: number; want: number }) {
-  const pct = Math.min(100, Math.round((100 * have) / Math.max(1, want)))
-  const tone = pct < 50 ? 'bg-hostile' : pct < 90 ? 'bg-amber' : 'bg-friendly'
-  return (
-    <div>
-      <div className="flex justify-between text-[11px] text-muted"><span className="uppercase tracking-wider">{label}</span><span className="cz-num">{have}/{want}</span></div>
-      <div className="mt-1 h-1 bg-line"><div className={`h-1 ${tone}`} style={{ width: `${pct}%` }} /></div>
-    </div>
-  )
 }
 
 function NextOperation({ e, others, signedIn }: { e: BoardEntry; others: BoardEntry[]; signedIn: boolean }) {
@@ -83,14 +66,10 @@ export default function Hub() {
   useEffect(() => { setQuality(fixedTier(loadSettings().quality)); setClean(new URLSearchParams(window.location.search).has('clean')) }, [])
 
   const world = useQuery({ queryKey: ['world'], queryFn: api.world, refetchInterval: 10_000 })
-  const decisions = useQuery({ queryKey: ['decisions'], queryFn: () => api.decisions(6), refetchInterval: 15_000 })
-  const ex = useQuery({ queryKey: ['exchange', null], queryFn: () => api.exchange(null), refetchInterval: 15_000 })
 
   const board = world.data?.board ?? []
   const next = useMemo(() => pickNext(board), [board])
   const factions = world.data?.actors.filter((a) => a.kind === 'faction') ?? []
-  const merchant = world.data?.actors.find((a) => a.kind === 'merchant')
-  const readiness = useReadinessData()
   const needsCallsign = !!session && !profileLoading && !profile?.callsign
 
   return (
@@ -156,53 +135,9 @@ export default function Hub() {
           </div>
         </div>
 
-        {/* world status strip */}
-        <div className="grid grid-cols-1 gap-4 px-4 pb-4 sm:px-8 sm:pb-6 md:grid-cols-3">
-          <section className="cz-panel p-4">
-            <div className="cz-label mb-2">World status</div>
-            <div className="grid grid-cols-2 gap-3">
-            {factions.map((f) => {
-              const wa = readiness.actor(f.id)
-              return (
-                <div key={f.id} className="space-y-1.5">
-                  <div><div className="font-display font-bold uppercase leading-tight tracking-wider">{f.name}</div><div className="text-[11px] text-dim">defense level {f.defense}</div></div>
-                  {wa ? <ReadinessSummary a={wa} inbound={readiness.inbound(f.id)} compact /> : <p className="text-xs text-muted">Reading the front…</p>}
-                  <details className="text-xs">
-                    <summary className="cursor-pointer text-steel hover:text-fog">Stock levels</summary>
-                    <div className="mt-2 space-y-2">{RES.map((r) => <Meter key={r} label={r} have={f.holdings[r]} want={target(f, r)} />)}</div>
-                  </details>
-                </div>
-              )
-            })}
-            </div>
-            {merchant && <div className="mt-2 text-xs text-muted">{merchant.name}: {merchant.holdings.credits.toLocaleString()} cr{world.data?.market.insolvent ? ' · insolvent, not buying' : ''}</div>}
-          </section>
-          <section className="cz-panel p-4">
-            <div className="cz-label mb-2">Alerts</div>
-            {(ex.data?.shortages ?? []).length === 0 && <p className="text-sm text-muted">No shortages.</p>}
-            <ul className="space-y-1.5 text-sm">
-              {(ex.data?.shortages ?? []).slice(0, 3).map((s) => (
-                <li key={`${s.actor}-${s.resource}`}><span className="font-semibold text-amber">{s.name}</span> short {s.short} {s.resource} <span className="text-muted">({s.have}/{s.target})</span></li>
-              ))}
-            </ul>
-            {ex.data && (
-              <div className="mt-3 flex gap-4 text-xs text-muted">
-                {ex.data.prices.map((p) => <span key={p.resource} className="cz-num">{p.resource} {p.ask} cr</span>)}
-              </div>
-            )}
-          </section>
-          <section className="cz-panel p-4">
-            <div className="cz-label mb-2">Faction activity</div>
-            <ul className="space-y-2 text-sm">
-              {(decisions.data ?? []).slice(0, 2).map((d) => (
-                <li key={d.seq} className="line-clamp-2 leading-snug">
-                  <span className="font-semibold text-steel">{d.source.replace(/^agent:/, '').replace(/^\w/, (c) => c.toUpperCase())}</span>{' '}
-                  <span className="text-muted">{d.payload.rationale ?? d.payload.trigger ?? 'acted'}</span>
-                </li>
-              ))}
-              {decisions.data?.length === 0 && <li className="text-muted">Quiet. No decisions yet this cycle.</li>}
-            </ul>
-          </section>
+        {/* One operational update: what changed since the last look, and where each faction stands. */}
+        <div className="px-4 pb-4 sm:px-8 sm:pb-6 lg:max-w-[58rem]">
+          <SinceVisit tick={world.data?.clock?.tick ?? undefined} factions={factions.map((f) => ({ id: f.id, name: f.name }))} />
         </div>
       </div>
     </main>

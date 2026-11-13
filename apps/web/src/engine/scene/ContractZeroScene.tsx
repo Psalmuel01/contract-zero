@@ -32,6 +32,12 @@ import { OperatorRig, type OperatorApi } from './OperatorRig';
 import { LEVELS } from '../fps/levels';
 import { groundHeight, railedMove } from '../fps/decks';
 import { LevelArt } from './LevelArt';
+import { makeSiteGround } from './siteGround';
+import { reloadPose, safeWeaponDepth } from './viewmodelPose';
+import { SiteDressing, SiteSky } from './SiteDressing';
+import { gradeTheme, type Phase as SitePhase } from './siteLook';
+/** Where the sun sits over a structured site (matches the key light's offset below). */
+const SITE_SUN = new THREE.Vector3(22, 34, 26);
 import { FieldProps } from './FieldProps';
 import { ItemInspector } from '@/components/inspect/ItemInspector';
 import type { InspectItem } from '@/components/inspect/itemInfo';
@@ -749,7 +755,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     () => [...mission.walls, ...mission.cover, ...dressingColliders(DRESSING)],
     [mission, DRESSING],
   );
-  const theme = themeForMission(mission);
+  // A structured site grades the hour's light toward its own air (siteLook): the hour
+  // says how bright it is, the site says what the air is like.
+  const sitePhase: SitePhase = mission.conditions?.phase ?? (mission.zone === 'BLACKSITE' ? 'night' : mission.zone === 'REDYARD' ? 'dusk' : 'day');
+  const theme = useMemo(() => (LEVEL ? gradeTheme(themeForMission(mission), LEVEL.id, sitePhase) : themeForMission(mission)), [mission, LEVEL, sitePhase]);
   const isFinale = !endless && mission.id === CAMPAIGN[CAMPAIGN.length - 1].id;
   const survival = !!mission.survival;
   const blackout = !!mission.blackout; // the Rift with NVG jammed — fight by muzzle-flash
@@ -902,6 +911,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const crouchCur = useRef(0);
   /** How high the floor under the player is: 0 on the ground, up to a catwalk's height on stairs and decks (fps/decks). */
   const floorY = useRef(0);
+  const standOn = useRef(0); // the walking surface under the player (decks; see groundHeight)
   const bobPhase = useRef(0);
   const footstepAt = useRef(0);
   const swayT = useRef(0); // bodycam handheld drift (slice 7)
@@ -913,6 +923,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   // Touch and minimal tiers load colour maps only (two thirds less texture memory; see usePbr).
   const colourOnly = lowSpec || minimal;
   const floorMaps = usePbr('burned_ground_01', [12, 20], undefined, colourOnly);
+  const hardstandingMaps = usePbr('concrete_floor_worn_001', [1, 1], '/textures/hangar', colourOnly);
   const brickMaps = usePbr('broken_brick_wall', [7, 1.6], undefined, colourOnly);
   const plasterMaps = usePbr('damaged_plaster', [4, 1.4], undefined, colourOnly);
   const plankMaps = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
@@ -950,7 +961,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     [minimal],
   );
   const shellMaterials = useMemo(() => ({
-    floor: makeTriplanarMaterial(floorMaps, { color: theme.floorTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.9, detail: 9.7, detailAmount: 0.6, macro: 0.11, macroAmount: 0.4, ...octaves }),
+    floor: makeSiteGround(floorMaps, hardstandingMaps, LEVEL?.id, theme.floorTint, minimal),
     brick: makeTriplanarMaterial(brickMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.7, detail: 9.3, detailAmount: 0.62, macro: 0.13, macroAmount: 0.3, ...octaves }),
     plaster: makeTriplanarMaterial(plasterMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.8, detail: 8.7, detailAmount: 0.68, macro: 0.13, macroAmount: 0.32, ...octaves }),
     // Cover boxes are the surface you are most often pressed right up against —
@@ -978,7 +989,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // The cap on top of a wall. Was a flat grey box, which read as the graybox it
     // was; concrete at a coarse tile makes it a poured coping instead.
     coping: makeTriplanarMaterial(plasterMaps, { color: '#59565e', roughness: 0.9, metalness: 0 }, { metresPerTile: 1.3, detail: 9.1, detailAmount: 0.5, ...octaves }),
-  }), [floorMaps, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves]);
+  }), [floorMaps, hardstandingMaps, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves, LEVEL?.id, minimal]);
 
   /**
    * Set-dressing surfaces.
@@ -1182,6 +1193,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   // ── Scene objects ──
   const vmRef = useRef<THREE.Group>(null);
+  const reloadStartedAt = useRef(0);
   const swapRaise = useRef(0);          // 1 → 0 dip when a weapon is raised
   const wantSlot = useRef<number | null>(null); // 1/2 keys pick a slot
   const wantSwap = useRef(false);       // the swap key cycles
@@ -1570,7 +1582,27 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     w.__czRender = () => {
       let casting = 0;
       scene.traverse((o) => { if ((o as THREE.Light).isLight && o.castShadow) casting++; });
-      return { pixelRatio: gl.getPixelRatio(), shadowCasters: casting, ...tierRef.current };
+      const fog = scene.fog as THREE.Fog | null;
+      return { pixelRatio: gl.getPixelRatio(), shadowCasters: casting, fog: fog ? { color: `#${fog.color.getHexString()}`, near: fog.near, far: fog.far } : null, ...tierRef.current };
+    };
+    // Which instanced meshes the camera's frustum keeps, with their bounds (culling checks).
+    w.__czCull = () => {
+      const f = new THREE.Frustum().setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse));
+      const out: { n: number; c: number[]; r: number; spread: number; inView: boolean; visible: boolean }[] = [];
+      scene.traverse((o) => {
+        const m = o as THREE.InstancedMesh;
+        if (!m.isInstancedMesh) return;
+        const s = m.boundingSphere?.clone().applyMatrix4(m.matrixWorld);
+        let shown = true;
+        for (let p: THREE.Object3D | null = m; p; p = p.parent) if (!p.visible) shown = false;
+        // How far apart the instances really stand (from their matrices, not the bounds).
+        const a = m.instanceMatrix.array;
+        let spread = 0;
+        for (let i = 1; i < m.count; i++) spread = Math.max(spread, Math.hypot(a[i * 16 + 12] - a[12], a[i * 16 + 14] - a[14]));
+        out.push({ n: m.count, c: s ? s.center.toArray().map((v) => +v.toFixed(1)) : [], r: s ? +s.radius.toFixed(1) : -1, spread: +spread.toFixed(1), inView: s ? f.intersectsSphere(s) : true, visible: shown });
+      });
+      const cam = camera as THREE.PerspectiveCamera;
+      return { near: cam.near, far: cam.far, meshes: out };
     };
     // audition any presence line (also lets us verify which ids have a recording)
     w.__czVo = (id: string, speaker: Speaker) => audio.vo(id, speaker);
@@ -1585,6 +1617,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     w.__czWakeRoom = (room: number) => sim.setRoomActive(room, true); // headless room activation
     w.__czSwitch = (n?: number) => (typeof n === 'number' ? sim.switchGun(n) : sim.nextWeapon());
     w.__czFire = (on: boolean) => { controls.current.fire = !!on; }; // headless: hold the trigger (aim-assist test)
+    w.__czAds = (on: boolean) => { controls.current.ads = !!on; }; // headless: aim down sights (viewmodel captures)
     w.__czToggle = (a: Attachment) => sim.toggleAttachment(a);
     // C3: WebGL resource + draw snapshot — the soak probe watches memory.geometries/
     // textures/programs for growth (a disposal leak) over a long run.
@@ -1618,8 +1651,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     return () => {
       delete w.__czState; delete w.__czKillAll; delete w.__czKillRoom; delete w.__czKillPlayer; delete w.__czAim; delete w.__czAudio;
       delete w.__czMission; delete w.__czEndless; delete w.__czWarp; delete w.__czSkipBriefing; delete w.__czFloor;
-      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czToggle;
-      delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats;
+      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czAds; delete w.__czToggle;
+      delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats; delete w.__czCull;
     };
   }, [sim, audio]);
 
@@ -1640,6 +1673,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   const tmp = useMemo(() => new THREE.Vector3(), []);
   const tmp2 = useMemo(() => new THREE.Vector3(), []);
+  const adsTarget = useMemo(() => new THREE.Vector3(), []);
   const fwd = useMemo(() => new THREE.Vector3(), []);
   const arrowWp = useMemo(() => new THREE.Vector3(), []);
   const arrowCs = useMemo(() => new THREE.Vector3(), []);
@@ -1870,7 +1904,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
     // The floor follows stairs and decks (steeply up, a little slower on the way down).
     {
-      const want = LEVEL ? groundHeight(LEVEL, pos.current.x, pos.current.z) : 0;
+      // From the surface you stand on (not the smoothed eye floor), so only a step's
+      // reach counts: walking under the catwalk or into a stair's side keeps you down.
+      const want = LEVEL ? groundHeight(LEVEL, pos.current.x, pos.current.z, standOn.current) : 0;
+      standOn.current = want;
       const k = want > floorY.current ? 16 : 9;
       floorY.current += (want - floorY.current) * Math.min(1, dt * k);
       if (Math.abs(want - floorY.current) < 0.002) floorY.current = want;
@@ -1951,6 +1988,14 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
      */
     const handsGroup = activeMesh.getObjectByName('hands');
     if (handsGroup) handsGroup.visible = adsCur.current < 0.45;
+    // Shouldered, the stock is under the cheek: drawn, it was a slab across the sight picture.
+    const stockNode = activeMesh.getObjectByName('stock');
+    if (stockNode) stockNode.visible = adsCur.current < 0.45;
+    const reload = reloadPose((sim.time - reloadStartedAt.current) / sim.gun.reloadTime, sim.reloading, !!settingsRef?.current.access.reduceMotion);
+    const magazine = activeMesh.getObjectByName('magazine');
+    if (magazine) magazine.position.y = -reload.magazineDrop;
+    const support = handsGroup?.getObjectByName('support-hand');
+    if (support && typeof support.userData.restY === 'number') support.position.y = support.userData.restY - reload.handReach;
     swapRaise.current = Math.max(0, swapRaise.current - dt * 2.4);
     const vm = vmRef.current;
     // While the weapon is on the deck it must not also be in your hands.
@@ -1958,16 +2003,19 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     if (vm) {
       const local = tmp.copy(VIEWMODEL_HIP).lerp(VIEWMODEL_ADS, adsCur.current);
       local.z += view.z; local.y += view.y;                 // where this weapon sits
+      if (view.ads) {
+        // A weapon with a real sight line: from its own hip pose to its shouldered one.
+        local.set(VIEWMODEL_HIP.x, VIEWMODEL_HIP.y + view.y, VIEWMODEL_HIP.z + view.z)
+          .lerp(adsTarget.set(...view.ads), adsCur.current);
+      }
       // bob: a gentle walk figure-8 on the viewmodel when moving
       const bob = BOB * (moving ? 1 : 0) * (settingsRef?.current.access.reduceMotion ? 0 : 1);
       local.x += Math.sin(bobPhase.current) * bob;
       local.y += Math.abs(Math.cos(bobPhase.current)) * bob;
       local.y -= swapRaise.current * 0.22;                  // dips down as it's raised
       local.z += recoilP.current * 2.2; // kick back toward the camera on fire
-      // WALL PULLBACK: retract the viewmodel toward the eye when a wall is close ahead,
-      // so the barrel can't poke through geometry when you press up against it. Cast the
-      // camera's forward ray at the colliders; the nearer the wall, the further back the
-      // gun is pulled (never fully collapsed, so it doesn't pop out of view).
+      // Near-wall presentation follows the camera ray against the actual colliders.
+      // Keep the stock ahead of the eye and lower the muzzle as the wall approaches.
       cam.getWorldDirection(fwd);
       const gco: Vec3 = [cam.position.x, cam.position.y, cam.position.z];
       const gcd: Vec3 = [fwd.x, fwd.y, fwd.z];
@@ -1976,15 +2024,15 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         const tc = rayAABB(gco, gcd, aabbOfCover(c));
         if (tc !== null && tc < wallAhead) wallAhead = tc;
       }
-      const GUN_CLEAR = 1.1; // begin retracting when a wall is within this many metres
-      if (wallAhead < GUN_CLEAR) {
-        const k = Math.max(0.12, wallAhead / GUN_CLEAR);
-        local.z *= k;                 // barrel drawn back toward the eye
-        local.y -= (1 - k) * 0.06;    // and dipped a touch, like lowering the weapon
-      }
+      const GUN_CLEAR = 1.1; // begin lowering inside this distance
+      // Lower the muzzle rather than pushing the stock through the eye plane.
+      const wallLower = 1 - THREE.MathUtils.clamp(wallAhead / GUN_CLEAR, 0, 1);
+      local.y -= wallLower * 0.14 + reload.dip;
+      local.z = safeWeaponDepth(local.z, GUN_LENGTH[activeId], view.scale, view.ads ? 0 : adsCur.current);
       vm.position.copy(cam.localToWorld(local));
       vm.quaternion.copy(cam.quaternion);
-      vm.rotateX(-recoilP.current * 1.6);
+      vm.rotateX(-recoilP.current * 1.6 - wallLower * 0.65);
+      vm.rotateZ(reload.roll);
       vm.updateMatrixWorld();
     }
 
@@ -2118,6 +2166,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         swapRaise.current = 1;      // the new weapon dips in from below
         audio.reloadEnd();          // a mechanical rack/click
       } else if (ev.kind === 'reloadStart') {
+        reloadStartedAt.current = sim.time;
         audio.reloadStart();
       } else if (ev.kind === 'reloadEnd') {
         audio.reloadDone();         // mag-in + charging-handle rack
@@ -3669,7 +3718,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     <>
       <color attach="background" args={[theme.bg]} />
       <fog attach="fog" args={theme.fog} />
-      <SkyDome top={theme.sky.top} bottom={theme.sky.bottom} />
+      {LEVEL
+        ? <SiteSky theme={theme} phase={sitePhase} level={LEVEL} sunDir={SITE_SUN} frozen={!!settingsRef?.current.access.reduceMotion} />
+        : <SkyDome top={theme.sky.top} bottom={theme.sky.bottom} />}
 
       {/* low ash-lit sun + cold fill, then restrained practicals so darkness has
           shape. Point-light intensity is in physical units: single digits, not tens. */}
@@ -3731,7 +3782,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           off the FRONT of this list, which shifts every later index and would make
           React re-render every wall in the world on each room advance — a hitch per
           doorway. Keyed this way, the walls that didn't change keep their identity. */}
-      {LEVEL && <LevelArt level={LEVEL} cues={mission.cues} minimal={minimal} colourOnly={colourOnly} lit={mission.zone !== 'DUSTLINE'} night={mission.conditions ? mission.conditions.phase === 'night' : undefined} calm={settingsRef?.current.access.reduceFlashes} />}
+      {LEVEL && <LevelArt level={LEVEL} cues={mission.cues} minimal={minimal} colourOnly={colourOnly} lit={mission.zone !== 'DUSTLINE'} night={mission.conditions ? mission.conditions.phase === 'night' : undefined} calm={settingsRef?.current.access.reduceFlashes} terrain={false} />}
+      {LEVEL && <SiteDressing level={LEVEL} theme={theme} phase={sitePhase} holder={mission.site?.holder ?? null} minimal={minimal} frozen={!!settingsRef?.current.access.reduceMotion} particles={plan.particles} />}
       {!LEVEL && LEVEL_WALLS.map((c, i) => (
         <group key={`w${c.x}_${c.z}_${c.w}_${c.d}`}>
           {/* Every wall SHARES one unit cube and is scaled to size. Authoring a fresh
@@ -5031,7 +5083,7 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           <span style={{ fontSize: 12, letterSpacing: 2, color: '#6f7d8c' }}>{mode === 'endless' ? `CONTRACT ZERO · ${seasonal ? 'SEASONAL CAMPAIGN' : 'ENDLESS'} · ${mission.name}` : mode === 'gauntlet' ? 'CONTRACT ZERO · GAUNTLET · RANKED' : mode === 'survival' ? 'CONTRACT ZERO · SURVIVAL · THE KILL-HOUSE' : mode === 'contract' ? `CONTRACT ZERO · ${mission.name}` : `CONTRACT ZERO · ${mission.zone} · OP ${missionIndex + 1}/${CAMPAIGN.length}`}</span>
         </div>
         {!isTouch && (
-          <div style={{ position: 'absolute', right: 26, top: 20, fontSize: 11, lineHeight: 1.7, textAlign: 'right', color: '#6f7d8c' }}>
+          <div style={{ position: 'absolute', right: 26, top: 20, maxWidth: '42vw', fontSize: 11, lineHeight: 1.7, textAlign: 'right', color: '#c4ced7', background: 'rgba(8,12,16,.72)', padding: '6px 10px', borderRadius: 4 }}>
             {(() => {
               const b = settings.controls.binds, k = (a: Action) => bindLabel(b, a);
               return (<>
@@ -5043,9 +5095,11 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           </div>
         )}
 
-        {/* aim hint — desktop only (mobile has visible controls) */}
+        {/* aim hint — desktop only (mobile has visible controls). Below the centre, not
+            across it: until the mouse is captured it sat over the crosshair and whatever
+            you were trying to look at. */}
         {!isTouch && (
-          <div ref={(r) => { hud.current.lock = r; }} style={{ position: 'absolute', left: '50%', top: '44%', transform: 'translate(-50%,0)', fontSize: 13, color: '#9fb4c8', background: 'rgba(0,0,0,.45)', padding: '8px 14px', borderRadius: 6 }}>
+          <div ref={(r) => { hud.current.lock = r; }} style={{ position: 'absolute', left: '50%', top: '64%', transform: 'translate(-50%,0)', maxWidth: 'min(640px, 80vw)', textAlign: 'center', fontSize: 12, lineHeight: 1.5, color: '#c4ced7', background: 'rgba(8,12,16,.72)', padding: '7px 14px', borderRadius: 6 }}>
             AIM UP/DOWN: move the mouse (captures on your first keypress) · or use the ARROW KEYS · Esc releases the mouse, then EXIT / ⏸ are top-left
           </div>
         )}

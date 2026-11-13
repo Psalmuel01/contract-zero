@@ -14,7 +14,7 @@ const WEB = process.argv[2] ?? 'http://localhost:3000'
 // Triangle counts vary run to run with what is in view (Blacksite night read 98k-126k), so the ceiling sits above that.
 const CEIL = { calls: 270, triangles: 140_000 }
 const BUDGET = { 'dustline-depot': CEIL, blacksite: CEIL, 'cinder-yard': CEIL }
-const b = await chromium.launch({ args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
+const b = await chromium.launch({ channel: 'chrome', args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
 let failed = 0
 for (const site of Object.keys(BUDGET)) for (const phase of ['day', 'night']) {
   const page = await (await b.newContext({ viewport: { width: 1280, height: 720 } })).newPage()

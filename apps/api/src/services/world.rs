@@ -27,6 +27,7 @@ pub enum WorldError {
 pub struct WorldService {
     world: Arc<Mutex<World>>,
     db: PgPool,
+    strategic_events: tokio::sync::broadcast::Sender<Value>,
     /// NEAR settlement, when configured. `None` keeps the economy fully off-chain.
     near: Option<Arc<super::near::NearClient>>,
 }
@@ -74,7 +75,11 @@ impl WorldService {
             tracing::info!("world: Halcyon Logistics joined at tick {}", world.tick);
         }
         tracing::info!("world: loaded at tick {} (version {})", world.tick, world.version);
-        Ok(Self { world: Arc::new(Mutex::new(world)), db, near })
+        Ok(Self { world: Arc::new(Mutex::new(world)), db, near, strategic_events: tokio::sync::broadcast::channel(256).0 })
+    }
+
+    pub fn strategic_events(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.strategic_events.subscribe()
     }
 
     pub fn db(&self) -> &PgPool {
@@ -117,7 +122,13 @@ impl WorldService {
         .await;
         match result {
             Ok(out) => match tx.commit().await {
-                Ok(()) => Ok(out),
+                Ok(()) => {
+                    // Notifications follow the commit, so rolled-back outcomes never trigger AI.
+                    for event in strategic_changes(&before, &w) {
+                        let _ = self.strategic_events.send(event);
+                    }
+                    Ok(out)
+                },
                 Err(e) => {
                     *w = before;
                     Err(e.into())
@@ -197,6 +208,23 @@ impl WorldService {
     }
 }
 
+fn strategic_changes(before: &World, after: &World) -> Vec<Value> {
+    let mut events = Vec::new();
+                    for (id, raid) in &after.raids {
+                        if matches!(raid.status, cz_economy::RaidStatus::Extracted { .. })
+                            && before.raids.get(id).is_none_or(|old| old.status != raid.status) {
+                            events.push(json!({ "trigger": "mission_completed", "raid": id, "target": raid.plan.target, "kind": raid.plan.kind.name(), "resource": raid.plan.resource.name(), "status": raid.status }));
+                        }
+                    }
+                    for (id, convoy) in &after.convoys {
+                        if matches!(convoy.status, cz_economy::ConvoyStatus::Seized { .. })
+                            && before.convoys.get(id).is_none_or(|old| old.status != convoy.status) {
+                            events.push(json!({ "trigger": "convoy_seized", "convoy": convoy }));
+                        }
+                    }
+    events
+}
+
 async fn persist(db: &mut PgConnection, w: &World) -> Result<(), sqlx::Error> {
     let state = serde_json::to_value(w).expect("world serializes");
     sqlx::query("INSERT INTO world_snapshots (tick, version, state) VALUES ($1, $2, $3)")
@@ -274,6 +302,27 @@ async fn record_history(w: &World, db: &mut PgConnection) -> Result<(), sqlx::Er
 mod tests {
     use super::*;
 
+    #[test]
+    fn strategic_events_require_new_successful_outcomes() {
+        let mut w = cz_economy::acceptance();
+        w.execute(&Caller::Player("tester.testnet".into()), &Action::StartRaid { target: "vanguard".into(), resource: cz_economy::Resource::Ammo }).unwrap();
+        let before = w.clone();
+        assert!(strategic_changes(&before, &w).is_empty(), "starting a mission is not a completed outcome");
+        let raid = w.raids.values_mut().next_back().unwrap();
+        raid.status = cz_economy::RaidStatus::Extracted { units: 10, bounty: 0 };
+        let events = strategic_changes(&before, &w);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["trigger"], "mission_completed");
+        assert_eq!(events[0]["target"], "vanguard");
+        assert!(strategic_changes(&w, &w).is_empty(), "unchanged outcomes must not retrigger");
+        let before = w.clone();
+        w.convoys.insert(999, cz_economy::Convoy { id: 999, owner: "vex".into(), resource: cz_economy::Resource::Ammo, units: 5, defense: 1, dispatched_at: 0, arrives_at: 10, status: cz_economy::ConvoyStatus::InTransit });
+        assert!(strategic_changes(&before, &w).is_empty());
+        let before = w.clone();
+        w.convoys.get_mut(&999).unwrap().status = cz_economy::ConvoyStatus::Seized { by: "ashen".into() };
+        assert_eq!(strategic_changes(&before, &w)[0]["trigger"], "convoy_seized");
+    }
+
     /// A failed action leaves nothing behind: not the rows it wrote, not the world change.
     /// Needs CZ_DB_TESTS=1 and DATABASE_URL (it reads the dev world but writes nothing
     /// that survives).
@@ -284,7 +333,7 @@ mod tests {
         }
         dotenvy::dotenv().ok();
         let db = PgPool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
-        let svc = WorldService { world: Arc::new(Mutex::new(cz_economy::acceptance())), db: db.clone(), near: None };
+        let svc = WorldService { world: Arc::new(Mutex::new(cz_economy::acceptance())), db: db.clone(), near: None, strategic_events: tokio::sync::broadcast::channel(256).0 };
         let tag = format!("test-atomic-{}", uuid::Uuid::new_v4());
         let before = svc.read(|w| w.version).await;
         let t = tag.clone();

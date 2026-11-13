@@ -21,12 +21,24 @@ export function stairHeight(s: Stair, x: number, z: number): number | null {
   return Math.max(0, Math.min(1, along / len)) * s.h
 }
 
-/** The height of the floor under (x, z): the highest deck or stair there, else the ground (0). */
-export function groundHeight(level: Decked | undefined, x: number, z: number): number {
+/** The most a single step can lift you. A stair rises a few centimetres a frame; a deck's
+ *  edge or a stair's side rises metres, so this tells walking up apart from teleporting. */
+export const STEP_UP = 0.6
+
+/**
+ * The height of the floor under (x, z): the highest deck or stair there that you can step
+ * onto from `from` (your current floor), else the ground (0).
+ *
+ * Without `from` it is the highest surface at that point, which is wrong for a body: the
+ * walkways have open ground under them, so walking beneath the catwalk or into the side of
+ * a stair would put you on top. A surface counts only if it is at most STEP_UP above you.
+ */
+export function groundHeight(level: Decked | undefined, x: number, z: number, from = Infinity): number {
   if (!level) return 0
+  const reach = from + STEP_UP
   let y = 0
-  for (const d of level.decks ?? []) if (inside(d, x, z) && d.h > y) y = d.h
-  for (const s of level.stairs ?? []) { const h = stairHeight(s, x, z); if (h !== null && h > y) y = h }
+  for (const d of level.decks ?? []) if (inside(d, x, z) && d.h > y && d.h <= reach) y = d.h
+  for (const s of level.stairs ?? []) { const h = stairHeight(s, x, z); if (h !== null && h > y && h <= reach) y = h }
   return y
 }
 
@@ -42,7 +54,7 @@ export function stairFoot(s: Stair): [number, number] {
  */
 export function railedMove(level: Decked | undefined, floor: number, ox: number, oz: number, nx: number, nz: number, maxDrop = 1.3): [number, number] {
   if (!level || floor < 0.5) return [nx, nz]
-  const ok = (x: number, z: number) => groundHeight(level, x, z) >= floor - maxDrop
+  const ok = (x: number, z: number) => groundHeight(level, x, z, floor) >= floor - maxDrop
   if (ok(nx, nz)) return [nx, nz]
   if (ok(nx, oz)) return [nx, oz]
   if (ok(ox, nz)) return [ox, nz]

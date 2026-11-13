@@ -15,6 +15,8 @@ const RUNS = [
   ['texture tiers (high, low, touch)', ['probe-texture-tiers.mjs', WEB]],
   ['per-site draw-call and triangle budgets', ['probe-site-budgets.mjs', WEB]],
   ['Cinder Yard catwalk, walked for real', ['probe-catwalk.mjs', WEB]],
+  ['Auto quality step-down keeps the site on screen', ['probe-auto-stepdown.mjs'], { BASE: WEB }],
+  ['War Table relief: renders, selects, flat map, phone', ['probe-wartable3d.mjs'], { BASE: WEB }],
   ['settlement guarantees without a chain', ['../../scripts/guarantees-e2e.mjs', API]],
   ['extracted run, consequence and aftermath', ['../../scripts/consequence-e2e.mjs', API]],
 ]

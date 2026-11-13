@@ -427,3 +427,25 @@ Before Milestone 8, a playtest found that cargo, sabotage, recovery and extracti
 - `wee_alloc` should be disabled at the next contract deployment.
 
 See `ACCESSIBILITY.md`, `PERFORMANCE.md` and `LICENSING.md`.
+
+
+### Event-driven strategic reviews
+
+The planner subscribes to committed world changes. A newly extracted raid, sabotage,
+or recovery, or a newly seized convoy, queues a review of all actors. Starting,
+failing, or replaying a mission does not queue a review. Notifications are sent only
+after the database transaction commits. The review includes the committed event
+context in the prompt and records its trigger/context in planner-call and decision
+logs. Proposals still pass the existing policy and economy checks.
+
+`PLANNER_COOLDOWN_SECS` defaults to 120 seconds after a scheduled round completes.
+Events received during that cooldown are grouped for the next eligible review;
+only the latest 32 event contexts are kept. A receiver backlog requests a fresh
+world review. Manual `/admin/plan` rounds are serialized with background rounds,
+but are operator overrides of the background cooldown.
+
+`PLANNER_EVERY_TICKS` remains the periodic fallback (default 6). Event rounds reset
+that fallback deadline. Reviews still run with no players online. Pending event
+notifications are in memory and do not survive a restart; the periodic review then
+observes the persisted world. A live funded-model run is needed to verify the
+resulting decisions after restarting the API.

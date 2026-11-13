@@ -9,6 +9,10 @@ export const FACTION_COLOR: Record<string, string> = {
   halcyon: 'var(--color-fog)',
 }
 export const factionColor = (id: string | null | undefined) => (id && FACTION_COLOR[id]) || 'var(--color-muted)'
+/** The same colours as plain hex, for paint on canvas (3D signs, flags, wall marks), which
+ *  can't read CSS variables. A test keeps them equal to the tokens in globals.css. */
+export const FACTION_PAINT: Record<string, string> = { vanguard: '#6fa3c7', ashen: '#e5484d', vex: '#f0a03c', halcyon: '#e8e4dc' }
+export const factionPaint = (id: string | null | undefined) => (id && FACTION_PAINT[id]) || '#8d929a'
 
 export interface FactionIdentity {
   id: string

@@ -73,6 +73,8 @@ pub struct Story {
     pub source: String,
     #[serde(default)]
     pub rewrites: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<Value>,
 }
 
 pub fn facts(w: &World, plan: &RaidPlan, player: &str) -> Facts {
@@ -225,6 +227,7 @@ pub fn authored(f: &Facts) -> Story {
         radio,
         source: "authored".into(),
         rewrites: vec![],
+        generation: None,
     }
 }
 
@@ -336,6 +339,18 @@ VANGUARD COMMAND: disciplined, cold, bureaucratic menace; counts everything.\n\
 ASHEN COMPACT: zealous fuel refiners; fire and ash imagery; threatens in short sentences.\n\
 VEX (Vex Exchange): the merchant; warm in the way a business is warm.";
 
+#[derive(Deserialize)]
+struct RewrittenLine { id: String, text: String }
+
+fn parse_rewrites(raw: &str) -> Result<Vec<RewrittenLine>, String> {
+    #[derive(Deserialize)]
+    struct Reply { lines: Vec<RewrittenLine> }
+    let raw = raw.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+    let reply: Reply = serde_json::from_str(raw).map_err(|e| format!("invalid dialogue JSON: {e}"))?;
+    if reply.lines.is_empty() { return Err("model returned no dialogue lines".into()); }
+    Ok(reply.lines)
+}
+
 /// Ask the model to voice the authored lines; keep only rewrites that pass the check.
 pub async fn rewrite(planner: &Planner, story: &mut Story, f: &Facts) -> Value {
     let mut lines: Vec<&mut Line> = story.briefing.iter_mut().chain(story.radio.values_mut().flatten()).collect();
@@ -343,18 +358,23 @@ pub async fn rewrite(planner: &Planner, story: &mut Story, f: &Facts) -> Value {
     let system = format!("You voice radio lines for CONTRACT ZERO, a tactical extraction shooter. Cast:\n{CAST}\n\nRewrite each line in its speaker's voice. Rules: keep every number exactly as written and add none; mention no person, place or faction that the line does not already name; keep each line under 150 characters; no out-of-world words (never mention blockchains, tokens, AI or the game's systems). Return every id.");
     let user = json!({ "situation": f, "lines": input }).to_string();
     let started = std::time::Instant::now();
-    let reply = planner.complete_json("story", schema(), &system, &user, 1200, Duration::from_secs(10)).await;
+    let max_tokens = std::env::var("STORY_MAX_TOKENS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(4096).clamp(1024, 16384);
+    let timeout = std::env::var("STORY_TIMEOUT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(30).clamp(1, 60);
+    let reply = planner.complete_json("story", schema(), &system, &user, max_tokens, Duration::from_secs(timeout)).await;
     let latency_ms = started.elapsed().as_millis() as u64;
     let (raw, usage) = match reply {
         Ok(r) => r,
         Err(e) => return json!({ "ok": false, "error": e, "latency_ms": latency_ms, "fallback": "authored lines" }),
     };
-    let parsed: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+    let parsed = match parse_rewrites(&raw) {
+        Ok(lines) => lines,
+        Err(error) => return json!({ "ok": false, "error": error, "latency_ms": latency_ms, "usage": usage, "fallback": "authored lines" }),
+    };
     let allowed: BTreeSet<String> = ["Kestrel", "Vanguard", "Ashen", "Compact", "Vex", "Exchange", "Dustline", "Depot", "Blacksite", "Command"]
         .iter().map(|s| s.to_string()).chain(f.callsign.clone()).chain(f.sponsor_name.iter().flat_map(|s| s.split(' ').map(String::from).collect::<Vec<_>>())).collect();
     let mut accepted = 0;
-    for item in parsed["lines"].as_array().into_iter().flatten() {
-        let (Some(id), Some(text)) = (item["id"].as_str(), item["text"].as_str()) else { continue };
+    for item in &parsed {
+        let (id, text) = (item.id.as_str(), item.text.as_str());
         let Some(l) = lines.iter_mut().find(|l| l.id == id) else { continue };
         match check_rewrite(&l.text, text, &allowed) {
             Ok(()) => {
@@ -368,12 +388,20 @@ pub async fn rewrite(planner: &Planner, story: &mut Story, f: &Facts) -> Value {
     if accepted > 0 {
         story.source = format!("llm:{}", planner.model);
     }
-    json!({ "ok": true, "latency_ms": latency_ms, "usage": usage, "accepted": accepted, "proposed": parsed["lines"].as_array().map(|a| a.len()).unwrap_or(0) })
+    json!({ "ok": accepted > 0, "latency_ms": latency_ms, "usage": usage, "accepted": accepted, "proposed": parsed.len(), "error": if accepted == 0 { Some("No rewritten lines passed validation") } else { None } })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn malformed_or_empty_model_dialogue_is_a_reported_failure() {
+        assert!(parse_rewrites("not JSON").is_err());
+        assert!(parse_rewrites(r#"{"lines":[]}"#).is_err());
+        assert!(parse_rewrites(r#"{"lines":[{"id":"test","text":{"bad":"shape"}}]}"#).is_err());
+        assert_eq!(parse_rewrites(r#"{"lines":[{"id":"test","text":"Hold position."}]}"#).unwrap().len(), 1);
+    }
 
     fn f(kind: &str, sponsor: Option<(&str, &str)>) -> Facts {
         Facts {
