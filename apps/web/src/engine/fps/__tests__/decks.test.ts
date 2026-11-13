@@ -34,6 +34,27 @@ describe('groundHeight', () => {
   })
 })
 
+describe('groundHeight from where you stand', () => {
+  const lv = { decks: [{ x: 0, z: -28.5, w: 11, d: 1.2, h: 4.8 }], stairs: [S] }
+  it('keeps you on the ground when you walk under the catwalk', () => {
+    expect(groundHeight(lv, 0, -28.5, 0)).toBe(0)
+  })
+  it('keeps you on the ground when you walk into the side of the stair half way up', () => {
+    expect(groundHeight(lv, 3, -26, 0)).toBe(0)
+  })
+  it('still carries you up the stair a step at a time, and onto the deck at the top', () => {
+    let y = 0
+    for (let z = -20; z >= -28.5; z -= 0.1) y = groundHeight(lv, 3, z, y)
+    expect(y).toBeCloseTo(4.8, 5)
+    expect(groundHeight(lv, 0, -28.5, y)).toBe(4.8)
+  })
+  it('and down again', () => {
+    let y = 4.8
+    for (let z = -28; z <= -20; z += 0.1) y = groundHeight(lv, 3, z, y)
+    expect(y).toBeLessThan(0.1)
+  })
+})
+
 describe('Cinder Yard catwalk', () => {
   const lv = LEVELS.cinder_yard
   const R = FPS_TUNING.ENEMY.BODY_R + 0.05

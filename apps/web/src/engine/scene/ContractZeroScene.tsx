@@ -909,6 +909,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const crouchCur = useRef(0);
   /** How high the floor under the player is: 0 on the ground, up to a catwalk's height on stairs and decks (fps/decks). */
   const floorY = useRef(0);
+  const standOn = useRef(0); // the walking surface under the player (decks; see groundHeight)
   const bobPhase = useRef(0);
   const footstepAt = useRef(0);
   const swayT = useRef(0); // bodycam handheld drift (slice 7)
@@ -1897,7 +1898,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
     // The floor follows stairs and decks (steeply up, a little slower on the way down).
     {
-      const want = LEVEL ? groundHeight(LEVEL, pos.current.x, pos.current.z) : 0;
+      // From the surface you stand on (not the smoothed eye floor), so only a step's
+      // reach counts: walking under the catwalk or into a stair's side keeps you down.
+      const want = LEVEL ? groundHeight(LEVEL, pos.current.x, pos.current.z, standOn.current) : 0;
+      standOn.current = want;
       const k = want > floorY.current ? 16 : 9;
       floorY.current += (want - floorY.current) * Math.min(1, dt * k);
       if (Math.abs(want - floorY.current) < 0.002) floorY.current = want;
