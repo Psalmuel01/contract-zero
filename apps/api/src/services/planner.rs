@@ -317,11 +317,124 @@ pub async fn run(state: &AppState, planner: &Planner) {
     run_triggered(state, planner, "manual strategic review", &[]).await;
 }
 
+// ── Spending discipline ─────────────────────────────────────────────────────
+// A periodic round used to call the model for every agent whatever had happened:
+// ~100 calls an hour overnight, all periodic, while the world sat still. Now a
+// periodic round only asks an agent whose situation has materially changed (or who
+// has not been asked for PLANNER_MAX_IDLE_SECS), events always ask, and a rolling
+// daily cap bounds the spend. Below the cap or not, the deterministic policies run
+// every tick regardless, so a skipped call never leaves an agent idle.
+
+/// What a commander actually decides on, coarsened: each stock as a band against its
+/// target (critical, low, adequate, comfortable, surplus), credits in doublings, defense,
+/// lines down, raids and grudges, the contracts, orders and proposals on the table, and
+/// prices in 25% bands of production cost. Production and consumption nudge every
+/// holding every tick; at two significant figures nearly every round looked new (715 of
+/// 720 in six quiet hours). This changes when the decision might.
+pub fn situation_fingerprint(o: &Value) -> String {
+    let n = |v: &Value| v.as_f64().unwrap_or(0.0);
+    let band = |have: f64, want: f64| -> u8 {
+        let r = if want <= 0.0 { if have > 0.0 { 9.0 } else { 1.0 } } else { have / want };
+        match r { x if x < 0.25 => 0, x if x < 0.5 => 1, x if x < 0.8 => 2, x if x < 1.25 => 3, x if x < 2.0 => 4, _ => 5 }
+    };
+    let doublings = |x: f64| if x <= 0.0 { -1 } else { x.log2().floor() as i64 };
+    let you = &o["you"];
+    let stocks: Vec<u8> = ["ammo", "med", "fuel"].iter().map(|r| band(n(&you["holdings"][r]), n(&you["targets"][r]))).collect();
+    let rivals: Vec<Value> = o["factions"].as_array().into_iter().flatten()
+        .map(|f| {
+            let held: Vec<i64> = ["ammo", "med", "fuel"].iter().map(|r| doublings(n(&f["holdings"][r]))).collect();
+            let depots = f["depots"].as_array().map_or(0, |d| d.len());
+            json!([f["id"], f["defense"], held, depots])
+        })
+        .collect();
+    let prices: Vec<i64> = o["market"]["prices"].as_array().into_iter().flatten()
+        .map(|p| { let c = n(&p["production_cost"]).max(1.0); (n(&p["ask"]) / c * 4.0).round() as i64 })
+        .collect();
+    let grudges = you["memory"]["players"].as_array().map_or((0, 0.0), |ps| (ps.len(), ps.iter().map(|g| n(&g["raids"]) + n(&g["sabotage"])).sum::<f64>()));
+    let key = json!({
+        "stocks": stocks,
+        "credits": doublings(n(&you["spendable_credits"])),
+        "defense": you["defense"],
+        "down": you["production_down"],
+        "raided": you["recent_raids_on_you"],
+        "grudges": [grudges.0, grudges.1],
+        "rivals_paid": you["memory"]["rivals_who_paid_for_raids_on_you"].as_array().map_or(0, |r| r.len()),
+        "rivals": rivals,
+        "insolvent": o["market"]["insolvent"],
+        "prices": prices,
+        "contracts": o["open_contracts"].as_array().map(|c| c.iter().map(|x| json!([x["kind"], x["sponsor"], x["target"], x["resource"]])).collect::<Vec<_>>()),
+        "orders": o["your_open_orders"].as_array().map(|os| os.iter().map(|x| json!([x["order"], x["filled"], x["proposals"].as_array().map_or(0, |p| p.len())])).collect::<Vec<_>>()),
+        "caravans": o["merchant_caravans_on_the_road"].as_array().map_or(0, |c| c.len()),
+    });
+    hex::encode(Sha256::digest(key.to_string().as_bytes()))
+}
+
+struct Spend {
+    /// Per agent: the fingerprint it was last asked about, and when.
+    last: std::collections::BTreeMap<String, (String, Instant)>,
+    /// Model calls in the last 24 h (strategic only; mission dialogue has its own).
+    calls: std::collections::VecDeque<Instant>,
+    seeded: bool,
+    warned_at: Option<Instant>,
+}
+static SPEND: tokio::sync::Mutex<Spend> = tokio::sync::Mutex::const_new(Spend { last: std::collections::BTreeMap::new(), calls: std::collections::VecDeque::new(), seeded: false, warned_at: None });
+
+fn env_u64(key: &str, default: u64) -> u64 {
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Why an agent is NOT asked this round, if it isn't.
+fn skip_reason(spend: &mut Spend, actor: &str, fingerprint: &str, periodic: bool, now: Instant) -> Option<&'static str> {
+    let day = Duration::from_secs(86_400);
+    while spend.calls.front().is_some_and(|t| now.duration_since(*t) > day) {
+        spend.calls.pop_front();
+    }
+    if spend.calls.len() as u64 >= env_u64("PLANNER_MAX_CALLS_PER_DAY", 800) {
+        return Some("daily call cap reached");
+    }
+    if periodic {
+        if let Some((fp, at)) = spend.last.get(actor) {
+            if fp == fingerprint && now.duration_since(*at) < Duration::from_secs(env_u64("PLANNER_MAX_IDLE_SECS", 1800)) {
+                return Some("situation unchanged");
+            }
+        }
+    }
+    None
+}
+
 async fn run_triggered(state: &AppState, planner: &Planner, trigger: &str, context: &[Value]) {
     let _round = ROUND_LOCK.lock().await;
+    let periodic = context.is_empty();
+    {
+        // Count the last day's calls once, so a restart doesn't reset the cap.
+        let mut spend = SPEND.lock().await;
+        if !spend.seeded {
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM world_events WHERE kind = 'planner_call' AND created_at > now() - interval '24 hours'")
+                .fetch_one(state.world.db()).await.unwrap_or(0);
+            let now = Instant::now();
+            spend.calls = (0..n.max(0)).map(|_| now).collect();
+            spend.seeded = true;
+        }
+    }
     let agents: Vec<String> = state.world.read(|w| w.actors.keys().cloned().collect()).await;
+    let mut skipped = Vec::new();
     for actor in agents {
         let (obs, system, tick) = state.world.read(|w| (observation(w, &actor), format!("{}\n{RULES}", character(w, &actor)), w.tick)).await;
+        let fingerprint = situation_fingerprint(&obs);
+        {
+            let mut spend = SPEND.lock().await;
+            let now = Instant::now();
+            if let Some(why) = skip_reason(&mut spend, &actor, &fingerprint, periodic, now) {
+                if why == "daily call cap reached" && spend.warned_at.is_none_or(|t| now.duration_since(t) > Duration::from_secs(600)) {
+                    tracing::warn!("planner: PLANNER_MAX_CALLS_PER_DAY reached; agents run on their deterministic policies until the window frees up");
+                    spend.warned_at = Some(now);
+                }
+                skipped.push(format!("{actor} ({why})"));
+                continue;
+            }
+            spend.calls.push_back(now);
+            spend.last.insert(actor.clone(), (fingerprint, now));
+        }
         let user = format!("Review trigger: {trigger}\nRecent committed events (JSON): {}\nObservation (JSON):\n{obs}", json!(context));
         let digest = hex::encode(Sha256::digest(user.as_bytes()));
         let started = Instant::now();
@@ -390,6 +503,9 @@ async fn run_triggered(state: &AppState, planner: &Planner, trigger: &str, conte
         let summary = summary.unwrap_or_else(|e| json!({ "error": e.to_string() }));
         let _ = log_event(&db, tick, &actor, "planner_call", &json!({ "model": planner.model, "trigger": trigger, "context": context, "ok": true, "latency_ms": latency_ms, "usage": usage, "observation_sha256": digest, "raw": raw.chars().take(2000).collect::<String>(), "outcome": summary })).await;
     }
+    if !skipped.is_empty() {
+        tracing::info!("planner: not asked this round: {}", skipped.join(", "));
+    }
 }
 
 fn review_due(now: tokio::time::Instant, next_allowed: tokio::time::Instant, next_periodic: tokio::time::Instant, has_events: bool) -> bool {
@@ -446,6 +562,57 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fingerprint_ignores_the_clock_and_drift_but_not_a_real_change() {
+        let mut w = cz_economy::genesis(1);
+        let base = situation_fingerprint(&observation(&w, "vanguard"));
+        let mut o = observation(&w, "vanguard");
+        o["tick"] = json!(999);
+        o["hour"] = json!(7);
+        assert_eq!(situation_fingerprint(&o), base, "the clock is not a change");
+        // A real shift in what the faction holds is.
+        let ammo = w.balance("faction:vanguard", Asset::Res(Resource::Ammo));
+        w.apply(&[cz_economy::Transfer { from: "faction:vanguard".into(), to: cz_economy::WORLD.into(), asset: Asset::Res(Resource::Ammo), qty: ammo / 2, reason: cz_economy::Reason::Consumption }]).unwrap();
+        assert_ne!(situation_fingerprint(&observation(&w, "vanguard")), base, "losing half the ammunition is");
+    }
+
+    #[test]
+    fn periodic_rounds_skip_unchanged_agents_events_never_do_and_the_cap_holds() {
+        let mut sp = Spend { last: Default::default(), calls: Default::default(), seeded: true, warned_at: None };
+        let now = Instant::now();
+        assert_eq!(skip_reason(&mut sp, "vex", "a", true, now), None, "never asked: ask");
+        sp.last.insert("vex".into(), ("a".into(), now));
+        assert_eq!(skip_reason(&mut sp, "vex", "a", true, now), Some("situation unchanged"));
+        assert_eq!(skip_reason(&mut sp, "vex", "b", true, now), None, "changed: ask");
+        assert_eq!(skip_reason(&mut sp, "vex", "a", false, now), None, "an event always asks");
+        let later = now + Duration::from_secs(1801);
+        assert_eq!(skip_reason(&mut sp, "vex", "a", true, later), None, "idle too long: ask anyway");
+        sp.calls = (0..800).map(|_| now).collect();
+        assert_eq!(skip_reason(&mut sp, "vex", "b", false, now), Some("daily call cap reached"));
+        assert_eq!(skip_reason(&mut sp, "vex", "b", false, now + Duration::from_secs(86_401)), None, "the window rolls");
+    }
+
+    #[test]
+    fn a_living_world_changes_materially_far_less_often_than_every_round() {
+        // Six in-game hours of an undisturbed world, a periodic round every 2 ticks:
+        // count how many rounds would actually ask each agent.
+        let mut w = cz_economy::genesis(7);
+        let agents: Vec<String> = w.actors.keys().cloned().collect();
+        let mut last: std::collections::BTreeMap<String, String> = Default::default();
+        let (mut asked, mut rounds) = (0, 0);
+        for t in 0..360 {
+            w.tick();
+            if t % 2 != 0 { continue }
+            rounds += agents.len();
+            for a in &agents {
+                let fp = situation_fingerprint(&observation(&w, a));
+                if last.get(a) != Some(&fp) { asked += 1; last.insert(a.clone(), fp); }
+            }
+        }
+        eprintln!("material changes: {asked} of {rounds} periodic agent-rounds");
+        assert!(asked * 4 < rounds, "a quiet world should ask under a quarter of the time: {asked} of {rounds}");
+    }
 
     #[test]
     fn events_bypass_periodic_wait_but_respect_cooldown() {
