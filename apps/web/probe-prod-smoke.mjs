@@ -32,6 +32,7 @@ for (const [label, opts] of [['desktop', { viewport: { width: 1366, height: 800 
   const errs = []
   page.on('pageerror', (e) => errs.push(e.message.slice(0, 120)))
   await page.goto(`${WEB}/training`, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {})
+  await page.click('[data-testid=mode-practice]', { timeout: 30000 }).catch(() => {})
   await page.click('[data-testid=start-practice]', { timeout: 30000 }).catch(() => {})
   const canvas = await page.waitForSelector('canvas', { timeout: 60000 }).then(() => true).catch(() => false)
   check(canvas, `${label} /training: the 3D scene mounts`)
