@@ -13,7 +13,7 @@ const AXE = fs.readFileSync(require.resolve('axe-core/axe.min.js'), 'utf8')
 const WEB = process.argv[2] ?? 'http://localhost:3000'
 const API = process.argv[3] ?? 'http://localhost:8080'
 const PAGES = ['/', '/contracts', '/exchange', '/exchange#orders', '/exchange#partners', '/war-room', '/war-room#powers', '/war-room#supply', '/war-room#decisions', '/operator', '/settings#interface', '/dev/results', '/dev/identity']
-const b = await chromium.launch()
+const b = await chromium.launch({ channel: 'chrome' })
 let fail = 0
 const bad = (kind, page, msg) => { fail++; console.log('FAIL', kind.padEnd(8), page.padEnd(20), msg) }
 const ok = (kind, page, msg = '') => console.log('PASS', kind.padEnd(8), page.padEnd(20), msg)

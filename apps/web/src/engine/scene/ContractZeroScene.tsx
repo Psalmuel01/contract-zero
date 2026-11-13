@@ -294,12 +294,19 @@ function detectTouchDevice(): boolean {
 function AutoQualityProbe({ level, onStep }: { level: AutoLevel; onStep: (l: AutoLevel) => void }) {
   const ctl = useMemo(() => new AutoQuality(level), [level]);
   useFrame((_, dt) => {
+    const before = ctl.level;
     const step = ctl.frame(dt);
-    if (step !== null) onStep(step);
+    if (step !== null) {
+      // Every step, for probes: each one replaces this controller, so the level alone
+      // can't say where Auto started.
+      const w = window as unknown as { __czAutoSteps?: { from: AutoLevel; to: AutoLevel; fps: number }[] };
+      (w.__czAutoSteps ??= []).push({ from: before, to: step, fps: Math.round(ctl.fps) });
+      onStep(step);
+    }
   });
   useEffect(() => {
     const w = window as unknown as Record<string, unknown>;
-    w.__czAutoQuality = () => ({ level: ctl.level, fps: Math.round(ctl.fps) });
+    w.__czAutoQuality = () => ({ level: ctl.level, fps: Math.round(ctl.fps), steps: (w.__czAutoSteps as unknown[] | undefined) ?? [] });
     return () => { delete w.__czAutoQuality; };
   }, [ctl]);
   return null;

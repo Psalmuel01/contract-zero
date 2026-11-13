@@ -4,7 +4,7 @@
 import { chromium } from 'playwright'
 
 const WEB = process.argv[2] ?? 'http://localhost:3000'
-const b = await chromium.launch({ args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
+const b = await chromium.launch({ channel: 'chrome', args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
 const count = {}
 for (const [name, settings, mobile] of [['high', { quality: 'high' }, false], ['low', { quality: 'low' }, false], ['touch', { quality: 'high' }, true]]) {
   const ctx = await b.newContext(mobile ? { viewport: { width: 844, height: 390 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : { viewport: { width: 1280, height: 720 } })

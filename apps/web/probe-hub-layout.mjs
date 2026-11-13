@@ -6,7 +6,7 @@ import { chromium } from 'playwright'
 const WEB = process.env.WEB_URL ?? 'http://localhost:3000'
 const API = process.env.API_URL ?? 'http://localhost:8080'
 const SIZES = [[1280, 720], [1366, 768], [1920, 1080], [390, 844]]
-const b = await chromium.launch()
+const b = await chromium.launch({ channel: 'chrome' })
 let failed = 0
 for (const [w, h] of SIZES) {
   const ctx = await b.newContext({ viewport: { width: w, height: h } })

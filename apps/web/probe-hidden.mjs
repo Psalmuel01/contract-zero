@@ -5,7 +5,7 @@
 import { chromium } from 'playwright'
 
 const WEB = process.argv[2] ?? 'http://localhost:3000'
-const b = await chromium.launch({ args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
+const b = await chromium.launch({ channel: 'chrome', args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
 let fail = 0
 const check = (name, ok, detail) => { if (!ok) fail++; console.log(ok ? 'PASS' : 'FAIL', name, JSON.stringify(detail)) }
 const hide = (page, v) => page.evaluate((v) => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => v }); document.dispatchEvent(new Event('visibilitychange')) }, v)

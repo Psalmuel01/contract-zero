@@ -186,7 +186,7 @@ function Display({ s }: { s: Settings }) {
         <Row label="Preset" hint={QUALITIES.find((q) => q.id === draft.quality)?.hint}>
           <Segmented name="quality" label="Graphics quality" value={draft.quality} onChange={(q) => setDraft((d) => ({ ...d, quality: q }))} testid="quality"
             options={QUALITIES.map((q) => ({ id: q.id, label: q.label, hint: q.hint }))} />
-          <span className="text-xs text-dim">This machine’s guess: {defaultQuality()}</span>
+          <MachineGuess />
         </Row>
         <Row label="Resolution scale" htmlFor="render-scale" hint="Share of the preset’s resolution rendered. Lower is faster and softer.">
           <Slider id="render-scale" value={g.renderScale} min={RENDER_SCALE_RANGE[0]} max={RENDER_SCALE_RANGE[1]} step={0.05} onChange={(v) => setG({ renderScale: v })} format={pct} />
@@ -577,4 +577,13 @@ function PromptPreview({ hc, keyName, inspect }: { hc: boolean; keyName: string;
       </div>
     </div>
   )
+}
+
+/** The device's suggested tier. Read after mounting: the server can't see the device, so
+ *  rendering it directly put "medium" in the server HTML and "high" in the browser, and
+ *  React refused the page (minified error #418 in production). */
+function MachineGuess() {
+  const [guess, setGuess] = useState<string | null>(null)
+  useEffect(() => { setGuess(defaultQuality()) }, [])
+  return <span className="text-xs text-dim">This machine’s guess: {guess ?? '…'}</span>
 }

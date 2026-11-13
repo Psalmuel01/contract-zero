@@ -9,7 +9,7 @@
 import { chromium } from 'playwright'
 
 const WEB = process.argv[2] ?? 'http://localhost:3000'
-const b = await chromium.launch({ args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
+const b = await chromium.launch({ channel: 'chrome', args: ['--ignore-gpu-blocklist', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] })
 let fail = 0
 const check = (name, ok, detail) => { if (!ok) fail++; console.log(ok ? 'PASS' : 'FAIL', name, JSON.stringify(detail)) }
 const open = async (settings, throttle = 1) => {
@@ -43,7 +43,10 @@ check('Low holds fewer textures than High; Medium no more', load.low.textures < 
   let level = start?.level ?? 0
   for (let i = 0; i < 90 && level === 0; i++) { await page.waitForTimeout(1000); level = (await page.evaluate(() => window.__czAutoQuality?.()))?.level ?? level }
   const now = await page.evaluate(() => window.__czAutoQuality?.())
-  check('Auto starts at High', start?.level === 0, start)
+  // Where Auto STARTED: its first step's origin, or its level if it hasn't stepped yet.
+  // (A slow machine can step down before the first reading; that's Auto working.)
+  const began = start?.steps?.[0]?.from ?? start?.level
+  check('Auto starts at High', began === 0, start)
   check('Auto steps the tier down by itself when the frame rate cannot hold', level > 0, now)
   await ctx.close()
 }
