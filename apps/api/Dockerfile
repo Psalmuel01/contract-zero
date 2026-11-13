@@ -2,7 +2,9 @@
 # Migrations and level layouts are compiled into the binary; signing keys come from the
 # environment (CZ_KEYS_JSON), never from the image.
 FROM rust:1-slim-bookworm AS build
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# perl and make: a dependency builds OpenSSL from source (openssl-src), whose Configure
+# needs full Perl; the slim image ships only perl-base, and the build failed on Railway.
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev perl make && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
