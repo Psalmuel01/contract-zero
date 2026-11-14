@@ -4,7 +4,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { AdaptiveDpr } from '@react-three/drei';
 import { AutoQuality, readAutoLevel, writeAutoLevel, type AutoLevel } from '../perf/autoQuality';
-import { EffectComposer, Bloom, Noise, Vignette, ChromaticAberration, N8AO, ToneMapping } from '@react-three/postprocessing';
+import { EffectComposer, Bloom, Noise, Vignette, ChromaticAberration, N8AO, ToneMapping, SMAA } from '@react-three/postprocessing';
 import { BlendFunction, ToneMappingMode } from 'postprocessing';
 import * as THREE from 'three';
 import { usePbr } from './usePbr';
@@ -975,6 +975,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const colourOnly = lowSpec || minimal;
   const floorMaps = usePbr('burned_ground_01', [12, 20], undefined, colourOnly);
   const hardstandingMaps = usePbr('concrete_floor_worn_001', [1, 1], '/textures/hangar', colourOnly);
+  // The road, laid into the ground shader rather than a slab on top of it.
+  const roadMaps = usePbr('asphalt_02', [1, 1], '/textures/hangar', colourOnly);
+  const roadRects = useMemo(() => (LEVEL ? LEVEL.art.filter((a) => a.kind === 'road').map((a) => ({ x: a.x, z: a.z, w: a.w ?? 6, d: a.d ?? 40 })) : []), [LEVEL]);
   const brickMaps = usePbr('broken_brick_wall', [7, 1.6], undefined, colourOnly);
   const plasterMaps = usePbr('damaged_plaster', [4, 1.4], undefined, colourOnly);
   const plankMaps = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
@@ -1012,7 +1015,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     [minimal],
   );
   const shellMaterials = useMemo(() => ({
-    floor: makeSiteGround(floorMaps, hardstandingMaps, LEVEL?.id, theme.floorTint, minimal),
+    floor: makeSiteGround(floorMaps, hardstandingMaps, LEVEL?.id, theme.floorTint, minimal, roadMaps, roadRects),
     brick: makeTriplanarMaterial(brickMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.7, detail: 9.3, detailAmount: 0.62, macro: 0.13, macroAmount: 0.3, ...octaves }),
     plaster: makeTriplanarMaterial(plasterMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.8, detail: 8.7, detailAmount: 0.68, macro: 0.13, macroAmount: 0.32, ...octaves }),
     // Cover boxes are the surface you are most often pressed right up against —
@@ -1040,7 +1043,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // The cap on top of a wall. Was a flat grey box, which read as the graybox it
     // was; concrete at a coarse tile makes it a poured coping instead.
     coping: makeTriplanarMaterial(plasterMaps, { color: '#59565e', roughness: 0.9, metalness: 0 }, { metresPerTile: 1.3, detail: 9.1, detailAmount: 0.5, ...octaves }),
-  }), [floorMaps, hardstandingMaps, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves, LEVEL?.id, minimal]);
+  }), [floorMaps, hardstandingMaps, roadMaps, roadRects, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves, LEVEL?.id, minimal]);
 
   /**
    * Set-dressing surfaces.
@@ -2148,7 +2151,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // NVG lifts the exposure (and the HUD tints green) so the dark reads — unless
     // this op is a BLACKOUT (NVG jammed), where the dark is the whole point.
     nvgAmt.current += (((sim.hasAttachment('nvg') && !blackout) ? 1 : 0) - nvgAmt.current) * Math.min(1, dt * 8);
-    gl.toneMappingExposure = (devToneMap.current?.exposure ?? 1.32) + nvgAmt.current * 1.7; // brighter base; NVG lifts further
+    gl.toneMappingExposure = (devToneMap.current?.exposure ?? BASE_EXPOSURE) * (theme.exposure ?? 1) + nvgAmt.current * 1.7; // the hour's exposure; NVG lifts further
     if (devToneMap.current && gl.toneMapping !== devToneMap.current.mode) gl.toneMapping = devToneMap.current.mode;
     // Optic deepens the ADS zoom (narrower FOV); no optic = a gentler aim zoom.
     const fovTarget = THREE.MathUtils.lerp(settingsRef?.current.fov ?? 55, sim.hasAttachment('optic') ? 30 : 45, adsCur.current);
@@ -3858,10 +3861,12 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       <directionalLight
         ref={sunRef}
         position={LEVEL ? [levelCx + 22, 34, levelCz + 26] : [9, 16, 10]} intensity={theme.sun.intensity} color={theme.sun.color} castShadow={plan.shadows}
-        shadow-mapSize={[lightFx ? 1024 : 2048, lightFx ? 1024 : 2048]}
+        // The map spans up to 100 m of site. 3072 on the full tier is a 3 cm texel
+        // (crisp contact under a barrier); 2048 on medium, 1024 on the light tiers.
+        shadow-mapSize={[lightFx ? 1024 : plan.post === 'full' ? 3072 : 2048, lightFx ? 1024 : plan.post === 'full' ? 3072 : 2048]}
         shadow-camera-left={-(LEVEL?.shadowHalf ?? 22)} shadow-camera-right={LEVEL?.shadowHalf ?? 22}
         shadow-camera-top={LEVEL?.shadowHalf ?? 22} shadow-camera-bottom={-(LEVEL?.shadowHalf ?? 22)}
-        shadow-camera-far={LEVEL ? 140 : 70} shadow-bias={-0.0008}
+        shadow-camera-far={LEVEL ? 140 : 70} shadow-bias={-0.0004} shadow-normalBias={0.025}
       />
       {/* The sun's aim point. Authored ops all fit inside the shadow camera's ±22
           box around the origin, but an endless run walks hundreds of metres past it,
@@ -4077,15 +4082,19 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       {plan.post === 'off' ? null : (plan.post === 'light' || endless) ? (
         <EffectComposer multisampling={0}>
           <ToneMapping mode={TONE_PP[tone.curve]} />
+          <SMAA />
           <ChromaticAberration offset={caOffset} radialModulation modulationOffset={0.35} blendFunction={BlendFunction.NORMAL} />
           <Vignette darkness={0.5} offset={0.3} blendFunction={BlendFunction.NORMAL} />
         </EffectComposer>
       ) : LEVEL ? (
-        // Structured levels: bloom for the practicals, but no N8AO. Its normal pass
-        // re-renders a 60 m level every frame for contact shadows the sun map gives anyway.
-        <EffectComposer multisampling={0}>
-          {mission.zone !== 'DUSTLINE' ? <Bloom intensity={0.22} luminanceThreshold={0.85} luminanceSmoothing={0.2} mipmapBlur /> : <></>}
+        // Structured levels, full tier: half-resolution ambient occlusion (contact under
+        // every barrier, pipe and vehicle the sun map cannot give), bloom for the
+        // practicals, the filmic curve, then anti-aliasing and the lens.
+        <EffectComposer multisampling={0} enableNormalPass>
+          <N8AO aoRadius={1.1} intensity={1.8} distanceFalloff={1.2} quality="performance" halfRes color="#0a0b10" />
+          <Bloom intensity={mission.zone !== 'DUSTLINE' ? 0.22 : 0.12} luminanceThreshold={0.85} luminanceSmoothing={0.2} mipmapBlur />
           <ToneMapping mode={TONE_PP[tone.curve]} />
+          <SMAA />
           <ChromaticAberration offset={caOffset} radialModulation modulationOffset={0.35} blendFunction={BlendFunction.NORMAL} />
           <Vignette darkness={0.5} offset={0.3} blendFunction={BlendFunction.NORMAL} />
         </EffectComposer>
@@ -4094,6 +4103,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           <N8AO aoRadius={1.4} intensity={2.6} distanceFalloff={1} quality="medium" color="#0a0a0e" />
           <Bloom intensity={0.18} luminanceThreshold={0.9} luminanceSmoothing={0.2} mipmapBlur />
           <ToneMapping mode={TONE_PP[tone.curve]} />
+          <SMAA />
           <ChromaticAberration offset={caOffset} radialModulation modulationOffset={0.35} blendFunction={BlendFunction.NORMAL} />
           <Noise premultiply blendFunction={BlendFunction.SCREEN} opacity={0.3} />
           <Vignette darkness={0.5} offset={0.3} blendFunction={BlendFunction.NORMAL} />
@@ -4978,7 +4988,9 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           must NOT tone-map again, or the image washes out. */}
       <Canvas
         shadows
-        gl={{ antialias: false, powerPreference: 'high-performance' }}
+        // Hardware multisampling only where there is no composer to do the work (the
+        // composer's own anti-aliasing is SMAA); under a composer it would be paid for and discarded.
+        gl={{ antialias: plan.post === 'off', powerPreference: 'high-performance' }}
         // C3: cap the render resolution. A retina phone is DPR 3 (9× the pixels of
         // DPR 1) — the single biggest mobile cost. Retina desktops render at DPR 2
         // (4× DPR 1) — the single biggest desktop cost. AdaptiveDpr trims toward the

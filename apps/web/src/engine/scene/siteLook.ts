@@ -38,23 +38,35 @@ interface Air {
   mix: number
   /** How far the zenith is pulled toward the haze (smog over the refinery, overcast). */
   zenith: number
+  /**
+   * Light shaping for the hour at this site, as multipliers on the hour's theme:
+   * the key (sun or moon), the hemisphere sky light, the fill, the flat ambient, and
+   * the exposure. Day wants a strong key over a quiet ambient so shadows carry depth;
+   * night wants the ambient held up just enough that the dark reads, with the
+   * practicals doing the rest.
+   */
+  light: { key: number; hemi: number; fill: number; ambient: number; exposure: number }
 }
+
+const DAY = { key: 1.3, hemi: 0.72, fill: 0.55, ambient: 0.4, exposure: 1.12 }
+const DUSK = { key: 1.35, hemi: 0.8, fill: 0.7, ambient: 0.55, exposure: 1.2 }
+const NIGHT = { key: 1.0, hemi: 0.85, fill: 0.8, ambient: 0.75, exposure: 1.3 }
 
 const AIR: Record<LevelId, Record<Phase, Air>> = {
   dustline_depot: {
-    day: { haze: '#d8c3a0', horizon: '#e3d1b0', ground: '#8a6a46', dirt: '#b9a284', thick: 0.86, mix: 0.55, zenith: 0.08 },
-    dusk: { haze: '#c98e5c', horizon: '#eaa868', ground: '#5a4128', dirt: '#a08668', thick: 0.86, mix: 0.5, zenith: 0.05 },
-    night: { haze: '#1c2232', horizon: '#2a3448', ground: '#141210', dirt: '#5e5a54', thick: 0.95, mix: 0.4, zenith: 0.0 },
+    day: { haze: '#d8c3a0', horizon: '#e3d1b0', ground: '#8a6a46', dirt: '#b9a284', thick: 0.86, mix: 0.55, zenith: 0.08, light: { ...DAY, key: 1.4, ambient: 0.35 } },
+    dusk: { haze: '#c98e5c', horizon: '#eaa868', ground: '#5a4128', dirt: '#a08668', thick: 0.86, mix: 0.5, zenith: 0.05, light: DUSK },
+    night: { haze: '#1c2232', horizon: '#2a3448', ground: '#141210', dirt: '#5e5a54', thick: 0.95, mix: 0.4, zenith: 0.0, light: { ...NIGHT, key: 1.15 } },
   },
   blacksite: {
-    day: { haze: '#a9b6bd', horizon: '#c3ced3', ground: '#3d4448', dirt: '#8e9398', thick: 0.72, mix: 0.6, zenith: 0.35 },
-    dusk: { haze: '#8a8e9e', horizon: '#b49b93', ground: '#2a2c33', dirt: '#7c7f86', thick: 0.75, mix: 0.5, zenith: 0.25 },
-    night: { haze: '#0c1820', horizon: '#14283a', ground: '#0b0f12', dirt: '#4b5056', thick: 0.8, mix: 0.45, zenith: 0.1 },
+    day: { haze: '#a9b6bd', horizon: '#c3ced3', ground: '#3d4448', dirt: '#8e9398', thick: 0.72, mix: 0.6, zenith: 0.35, light: { ...DAY, key: 1.15, hemi: 0.8, ambient: 0.5 } },
+    dusk: { haze: '#8a8e9e', horizon: '#b49b93', ground: '#2a2c33', dirt: '#7c7f86', thick: 0.75, mix: 0.5, zenith: 0.25, light: { ...DUSK, key: 1.2 } },
+    night: { haze: '#0c1820', horizon: '#14283a', ground: '#0b0f12', dirt: '#4b5056', thick: 0.8, mix: 0.45, zenith: 0.1, light: { ...NIGHT, ambient: 0.9, exposure: 1.4 } },
   },
   cinder_yard: {
-    day: { haze: '#a88c74', horizon: '#c4a586', ground: '#4a3a2e', dirt: '#8f8478', thick: 0.7, mix: 0.6, zenith: 0.5 },
-    dusk: { haze: '#9c5c3c', horizon: '#d47a44', ground: '#3a2418', dirt: '#86766a', thick: 0.72, mix: 0.6, zenith: 0.4 },
-    night: { haze: '#231612', horizon: '#3e2116', ground: '#120c0a', dirt: '#55504c', thick: 0.82, mix: 0.5, zenith: 0.25 },
+    day: { haze: '#a88c74', horizon: '#c4a586', ground: '#4a3a2e', dirt: '#8f8478', thick: 0.7, mix: 0.6, zenith: 0.5, light: { ...DAY, key: 1.2, hemi: 0.78, ambient: 0.45 } },
+    dusk: { haze: '#9c5c3c', horizon: '#d47a44', ground: '#3a2418', dirt: '#86766a', thick: 0.72, mix: 0.6, zenith: 0.4, light: { ...DUSK, key: 1.45 } },
+    night: { haze: '#231612', horizon: '#3e2116', ground: '#120c0a', dirt: '#55504c', thick: 0.82, mix: 0.5, zenith: 0.25, light: { ...NIGHT, ambient: 0.85, exposure: 1.35 } },
   },
 }
 
@@ -74,16 +86,21 @@ export function airFor(level: LevelId, phase: Phase): Air {
   return AIR[level][phase]
 }
 
-/** The hour's theme, graded toward the site's own air. Light intensities are untouched:
- *  the hour still decides how bright it is; the site decides what the air is like. */
+/** The hour's theme, graded toward the site's own air, with the light shaped for the
+ *  hour: a stronger key over a quieter ambient by day, the ambient held up at night. */
 export function gradeTheme(theme: ZoneTheme, level: LevelId, phase: Phase): ZoneTheme {
   const a = AIR[level][phase]
   const m = a.mix
+  const L = a.light
   return {
     ...theme,
     bg: mixHex(theme.bg, a.haze, m),
     fog: [mixHex(theme.fog[0], a.haze, m), theme.fog[1] * a.thick, theme.fog[2] * a.thick],
-    hemi: [mixHex(theme.hemi[0], a.haze, m * 0.3), mixHex(theme.hemi[1], a.ground, m), theme.hemi[2]],
+    hemi: [mixHex(theme.hemi[0], a.haze, m * 0.3), mixHex(theme.hemi[1], a.ground, m), theme.hemi[2] * L.hemi],
+    sun: { color: theme.sun.color, intensity: theme.sun.intensity * L.key },
+    fill: { color: theme.fill.color, intensity: theme.fill.intensity * L.fill },
+    ambient: theme.ambient * L.ambient,
+    exposure: L.exposure,
     floorTint: mixHex(theme.floorTint, a.dirt, m * 0.8),
     wallTint: mixHex(theme.wallTint, a.dirt, m * 0.5),
     sky: { top: mixHex(theme.sky.top, a.haze, a.zenith), bottom: mixHex(theme.sky.bottom, a.horizon, m) },

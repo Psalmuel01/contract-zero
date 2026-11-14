@@ -516,7 +516,9 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
     for (const a of level.art) {
       const { x, z } = a;
       switch (a.kind) {
-        case 'road': add('road', { x, y: 0.012, z, sx: a.w ?? 6, sy: 0.02, sz: a.d ?? 40 }); break;
+        // The ground shader lays the road into the floor on the full tiers (siteGround);
+        // the slab stays for Low, which samples one surface.
+        case 'road': if (minimal) add('road', { x, y: 0.012, z, sx: a.w ?? 6, sy: 0.02, sz: a.d ?? 40 }); break;
         case 'stripe': add('yellow', { x, y: 0.015, z, sx: a.w ?? 4, sy: 0.02, sz: a.d ?? 0.15 }); break;
         case 'roof': add('roof', { x, y: a.h ?? 7, z, sx: a.w ?? 10, sy: 0.12, sz: a.d ?? 10 }); break;
         case 'tower': {
@@ -641,7 +643,10 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           <mesh position={[0, (radar.h ?? 20) + 2.4, 0]}><sphereGeometry args={[3.4, 24, 16]} /><meshStandardMaterial color="#cfd6e0" emissive="#3a4a66" emissiveIntensity={0.5} /></mesh>
         </group>
       )}
-      {lit && level.lights.slice(0, minimal ? 2 : 4).map((l, i) => (
+      {/* Six practicals on the full and medium tiers (four left the vault and the far
+          rooms black at night), two on minimal. Each costs every lit fragment a loop
+          iteration, so the list stays short and the levels order it by importance. */}
+      {lit && level.lights.slice(0, minimal ? 2 : 6).map((l, i) => (
         <pointLight key={i} position={l.pos} color={l.color} intensity={l.intensity} distance={l.distance} decay={1.6} />
       ))}
     </group>

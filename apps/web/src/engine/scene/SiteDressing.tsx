@@ -522,10 +522,21 @@ function WearSet({ mat, items, tall }: { mat: THREE.Material; items: { x: number
 
 // ── Air ─────────────────────────────────────────────────────────────────────
 
+const MAX_ROOFS = 4
 const AIR_VERT = `
 uniform vec3 uCam; uniform float uTime, uSize, uBox, uKind;
+uniform vec4 uRoofs[${MAX_ROOFS}]; uniform int uRoofCount;
 attribute float aSeed;
 varying float vA;
+// Weather does not fall indoors: a particle under a roof's footprint is hidden.
+float sheltered(vec3 p){
+  for (int i = 0; i < ${MAX_ROOFS}; i++) {
+    if (i >= uRoofCount) break;
+    vec4 r = uRoofs[i];
+    if (p.x > r.x && p.x < r.y && p.z > r.z && p.z < r.w) return 1.0;
+  }
+  return 0.0;
+}
 void main(){
   vec3 p = position;
   float t = uTime;
@@ -536,11 +547,12 @@ void main(){
   // wrap the field around the camera so it always surrounds the player
   vec3 local = mod(w - uCam + uBox * 0.5, uBox) - uBox * 0.5;
   local.y = mod(w.y - uCam.y + 4.0, 14.0) - 4.0;
-  vec4 mv = modelViewMatrix * vec4(uCam + local, 1.0);
+  vec3 world = uCam + local;
+  vec4 mv = modelViewMatrix * vec4(world, 1.0);
   gl_Position = projectionMatrix * mv;
   float dist = -mv.z;
   gl_PointSize = min(uSize * (300.0 / max(dist, 0.5)), 24.0);
-  vA = smoothstep(uBox * 0.5, uBox * 0.25, length(local.xz)) * smoothstep(0.3, 2.0, dist);
+  vA = smoothstep(uBox * 0.5, uBox * 0.25, length(local.xz)) * smoothstep(0.3, 2.0, dist) * (1.0 - sheltered(world));
 }`;
 const AIR_FRAG = `
 uniform vec3 uColor; uniform float uKind, uAlpha;
@@ -555,7 +567,7 @@ void main(){
 
 const KIND_CODE = { dust: 0, rain: 2, ash: 3 } as const;
 
-function AirField({ kind, count, color, frozen, ember }: { kind: keyof typeof KIND_CODE; count: number; color: string; frozen: boolean; ember: boolean }) {
+function AirField({ kind, count, color, frozen, ember, roofs }: { kind: keyof typeof KIND_CODE; count: number; color: string; frozen: boolean; ember: boolean; roofs: THREE.Vector4[] }) {
   const { camera } = useThree();
   const box = kind === 'rain' ? 26 : 34;
   const geo = useMemo(() => {
@@ -574,9 +586,11 @@ function AirField({ kind, count, color, frozen, ember }: { kind: keyof typeof KI
       uSize: { value: kind === 'rain' ? 0.22 : kind === 'ash' ? 0.05 : 0.035 },
       uColor: { value: new THREE.Color(color) },
       uAlpha: { value: kind === 'rain' ? 0.35 : ember ? 0.9 : 0.55 },
+      uRoofs: { value: Array.from({ length: MAX_ROOFS }, (_, i) => roofs[i] ?? new THREE.Vector4()) },
+      uRoofCount: { value: Math.min(MAX_ROOFS, roofs.length) },
     },
     vertexShader: AIR_VERT, fragmentShader: AIR_FRAG,
-  }), [kind, color, box, ember]);
+  }), [kind, color, box, ember, roofs]);
   useEffect(() => () => { geo.dispose(); mat.dispose(); }, [geo, mat]);
   useFrame((_, dt) => {
     (mat.uniforms.uCam.value as THREE.Vector3).copy(camera.position);
@@ -605,6 +619,9 @@ export function SiteDressing({ level, theme, phase, holder, minimal, frozen, par
   }, [phase]);
   useEffect(() => () => Object.values(mats).forEach((m) => m.dispose()), [mats]);
   const flagTex = useMemo(() => (LANDMARKS[level.id].some((l) => l.kind === 'flag') ? flagTexture(holder) : null), [level.id, holder]);
+  // Roof footprints (x0, x1, z0, z1), so rain and ash stop at the eaves. The largest first.
+  const roofs = useMemo(() => level.art.filter((a) => a.kind === 'roof').sort((a, b) => (b.w ?? 0) * (b.d ?? 0) - (a.w ?? 0) * (a.d ?? 0))
+    .map((a) => new THREE.Vector4(a.x - (a.w ?? 10) / 2, a.x + (a.w ?? 10) / 2, a.z - (a.d ?? 10) / 2, a.z + (a.d ?? 10) / 2)), [level.art]);
   return (
     <group>
       <SiteTerrain level={level} phase={phase} theme={theme} center={center} minimal={minimal} />
@@ -617,7 +634,7 @@ export function SiteDressing({ level, theme, phase, holder, minimal, frozen, par
       <Marks level={level} holder={holder} />
       {!minimal && <Wear level={level} phase={phase} />}
       {particles && !minimal && airborne(level.id, phase).map((p) => (
-        <AirField key={p.kind} kind={p.kind} count={p.count} color={p.color} frozen={frozen} ember={p.kind === 'ash' && phase === 'night'} />
+        <AirField key={p.kind} kind={p.kind} count={p.count} color={p.color} frozen={frozen} ember={p.kind === 'ash' && phase === 'night'} roofs={roofs} />
       ))}
     </group>
   );
