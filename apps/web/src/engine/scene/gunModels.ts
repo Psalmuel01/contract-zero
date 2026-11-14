@@ -3,6 +3,7 @@ import { useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
 import type { GunId } from '../combat/GunStats';
 import { buildProceduralGun, type ProceduralGunId } from './proceduralGuns';
+import { finishWeapon } from './weaponFinish';
 
 /**
  * The five real weapon models, one per gun tier, for the first-person viewmodel.
@@ -88,6 +89,9 @@ function buildPrototype(src: THREE.Object3D, gunId: GunId): THREE.Group {
     const m = o as THREE.Mesh;
     if (m.isMesh) { m.castShadow = true; m.frustumCulled = false; }
   });
+  // The surface finish (edge wear, grain, grime) on the loaded materials, cloned so
+  // the GLB cache's own materials stay pristine for any other user of the file.
+  finishWeapon(inner);
 
   const group = new THREE.Group();
   group.add(inner);
@@ -140,7 +144,7 @@ export function useGunPrototypes(): Record<GunId, THREE.Group> {
     GUN_IDS.forEach((id, i) => { out[id] = buildPrototype(gltfs[i].scene, id); });
     // Seasonal weapons are assembled here rather than loaded, so they cost no
     // network fetch and are ready on the same frame as the rest.
-    for (const id of PROCEDURAL_IDS) out[id] = buildProceduralGun(id, PROCEDURAL_LEN[id]);
+    for (const id of PROCEDURAL_IDS) { out[id] = buildProceduralGun(id, PROCEDURAL_LEN[id]); finishWeapon(out[id]); }
     return out;
   }, [gltfs]);
 }
