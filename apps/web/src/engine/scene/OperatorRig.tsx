@@ -135,8 +135,11 @@ export const OperatorRig = forwardRef<OperatorApi, { modelPath: string }>(functi
         const c = m.clone() as THREE.MeshStandardMaterial;
         if (c.emissive) { c.emissive.setHex(0x000000); c.emissiveIntensity = 0; }
         // Without the amber tell, enemies must read on silhouette + light alone.
-        if (c.color) c.color.multiplyScalar(1.7);
-        c.roughness = Math.min(1, (c.roughness ?? 0.8) + 0.1);
+        // 1.7 was tuned against the old flat grade and read as plastic once the key
+        // light and exposure carried the scene; 1.35 keeps them visible at night
+        // without washing the fabric out by day.
+        if (c.color) c.color.multiplyScalar(1.35);
+        c.roughness = Math.min(1, (c.roughness ?? 0.8) + 0.18);
         mats.current.push(c);
         return c;
       };

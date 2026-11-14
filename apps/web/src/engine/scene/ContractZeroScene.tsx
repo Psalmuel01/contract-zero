@@ -4434,6 +4434,14 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
   const [runNonce, setRunNonce] = useState(0); // bump to remount = restart the op
   const [selectOpen, setSelectOpen] = useState(false);
   const [paused, setPaused] = useState(false); // C4: deliberate pause menu (Esc / ⏸)
+  // The control sheet earns its corner for the opening of a fight, then yields the
+  // screen: the pause menu and the Field Manual both carry the full bindings.
+  const [controlsHint, setControlsHint] = useState(true);
+  useEffect(() => {
+    setControlsHint(true);
+    const t = setTimeout(() => setControlsHint(false), 26_000);
+    return () => clearTimeout(t);
+  }, [runNonce]);
   const menuOpenRef = useRef(false); // read by FpsWorld's frame loop to pause
   const [inspecting, setInspecting] = useState<InspectItem | null>(null);
   const inspectingRef = useRef(false);
@@ -5231,7 +5239,7 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           <span style={{ fontSize: 12, letterSpacing: 2, color: '#6f7d8c' }}>{mode === 'endless' ? `CONTRACT ZERO · ${seasonal ? 'SEASONAL CAMPAIGN' : 'ENDLESS'} · ${mission.name}` : mode === 'gauntlet' ? 'CONTRACT ZERO · GAUNTLET · RANKED' : mode === 'survival' ? 'CONTRACT ZERO · SURVIVAL · THE KILL-HOUSE' : mode === 'contract' ? `CONTRACT ZERO · ${mission.name}` : `CONTRACT ZERO · ${mission.zone} · OP ${missionIndex + 1}/${CAMPAIGN.length}`}</span>
         </div>
         {!isTouch && (
-          <div style={{ position: 'absolute', right: 26, top: 20, maxWidth: '42vw', fontSize: 11, lineHeight: 1.7, textAlign: 'right', color: '#c4ced7', background: 'rgba(8,12,16,.72)', padding: '6px 10px', borderRadius: 4 }}>
+          <div style={{ position: 'absolute', right: 26, top: 20, maxWidth: '42vw', fontSize: 12, lineHeight: 1.7, textAlign: 'right', color: '#c4ced7', background: 'rgba(8,12,16,.72)', padding: '6px 10px', borderRadius: 4, opacity: controlsHint ? 1 : 0, transition: 'opacity 1.6s ease', pointerEvents: 'none' }}>
             {(() => {
               const b = settings.controls.binds, k = (a: Action) => bindLabel(b, a);
               return (<>
