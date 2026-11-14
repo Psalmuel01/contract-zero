@@ -82,7 +82,13 @@ pub struct HistoryQuery {
 
 /// GET /warroom: the strategic picture, the last `hours` of price and holdings
 /// history, recent faction broadcasts and the settlement queue's health.
-pub async fn overview(state: web::Data<AppState>, q: web::Query<HistoryQuery>) -> HttpResponse {
+/// Public and polled by every War Room tab: one computation serves all viewers (handlers::cache).
+pub async fn overview(state: web::Data<AppState>, q: web::Query<HistoryQuery>, req: actix_web::HttpRequest) -> HttpResponse {
+    let st = state.clone();
+    super::cache::shared(&state, &req, move || overview_fresh(st, q)).await
+}
+
+async fn overview_fresh(state: web::Data<AppState>, q: web::Query<HistoryQuery>) -> HttpResponse {
     let snap = state.world.read(snapshot).await;
     let db = state.world.db();
     let hours = q.hours.unwrap_or(96).clamp(6, 24 * 14);
@@ -204,7 +210,13 @@ fn settlement_json(op: &str, kind: &str, status: &str, hashes: &[String], error:
 
 /// GET /warroom/timeline: one causal chain per agent decision or player operation,
 /// newest first.
-pub async fn timeline(state: web::Data<AppState>, q: web::Query<TimelineQuery>) -> HttpResponse {
+/// Public and polled by every War Room tab: one computation serves all viewers (handlers::cache).
+pub async fn timeline(state: web::Data<AppState>, q: web::Query<TimelineQuery>, req: actix_web::HttpRequest) -> HttpResponse {
+    let st = state.clone();
+    super::cache::shared(&state, &req, move || timeline_fresh(st, q)).await
+}
+
+async fn timeline_fresh(state: web::Data<AppState>, q: web::Query<TimelineQuery>) -> HttpResponse {
     let limit = q.limit.unwrap_or(40).clamp(1, 200);
     let db = state.world.db();
     let rows: Vec<(i64, i64, String, String, Value)> = match sqlx::query_as(
@@ -298,7 +310,13 @@ pub struct ProcurementQuery {
 ///
 /// Every element is read from what was recorded (decisions, events, the settlement
 /// queue, the world); nothing is composed for display.
-pub async fn procurement(state: web::Data<AppState>, q: web::Query<ProcurementQuery>) -> HttpResponse {
+/// Public and polled by every War Room tab: one computation serves all viewers (handlers::cache).
+pub async fn procurement(state: web::Data<AppState>, q: web::Query<ProcurementQuery>, req: actix_web::HttpRequest) -> HttpResponse {
+    let st = state.clone();
+    super::cache::shared(&state, &req, move || procurement_fresh(st, q)).await
+}
+
+async fn procurement_fresh(state: web::Data<AppState>, q: web::Query<ProcurementQuery>) -> HttpResponse {
     let limit = q.limit.unwrap_or(12).clamp(1, 50) as usize;
     let db = state.world.db();
     let (orders, names, plans) = state
@@ -409,7 +427,13 @@ pub struct OperationsQuery {
 /// Only operations that recorded a consequence are listed; older sessions have no
 /// snapshot and are left out rather than reconstructed. A settlement that is not
 /// confirmed is reported with its real status.
-pub async fn operations(state: web::Data<AppState>, q: web::Query<OperationsQuery>) -> HttpResponse {
+/// Public and polled by every War Room tab: one computation serves all viewers (handlers::cache).
+pub async fn operations(state: web::Data<AppState>, q: web::Query<OperationsQuery>, req: actix_web::HttpRequest) -> HttpResponse {
+    let st = state.clone();
+    super::cache::shared(&state, &req, move || operations_fresh(st, q)).await
+}
+
+async fn operations_fresh(state: web::Data<AppState>, q: web::Query<OperationsQuery>) -> HttpResponse {
     let limit = q.limit.unwrap_or(10).clamp(1, 30);
     let db = state.world.db();
     let rows: Vec<(String, chrono::DateTime<chrono::Utc>, Value, Value)> = match sqlx::query_as(
