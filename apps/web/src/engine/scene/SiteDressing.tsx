@@ -468,6 +468,42 @@ function Signs({ level, holder }: { level: LevelDef; holder: string | null }) {
 
 // ── Ground wear ─────────────────────────────────────────────────────────────
 
+/**
+ * Where windblown sand banks against Dustline's structures: along each container and
+ * the warehouse's outer walls, on one or both faces, never over a spot the player
+ * must find (a pickup, an objective point, a cargo case, the extraction zone).
+ * Ground decals only: no collision, nothing to trip on.
+ */
+export function sandBanks(level: LevelDef, r: () => number): { x: number; z: number; s: number; l: number; ry: number }[] {
+  if (level.id !== 'dustline_depot') return [];
+  const f = level.field;
+  const clear: [number, number, number][] = [
+    ...Object.values(level.points).flatMap((p) => (Array.isArray(p[0]) ? (p as [number, number][]) : [p as [number, number]])).map(([x, z]) => [x, z, 1] as [number, number, number]),
+    ...[...f.cases, ...f.ammo, ...f.med, f.seized].map(([x, z]) => [x, z, 1] as [number, number, number]),
+    [f.exfil.pos[0], f.exfil.pos[1], f.exfil.radius + 0.5],
+  ];
+  const out: { x: number; z: number; s: number; l: number; ry: number }[] = [];
+  for (const b of level.walls) {
+    let faces: [number, number][] = [];
+    if (b.kind === 'container') faces = b.d > b.w ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
+    else if (b.kind === 'warehouse') faces = [b.d > b.w ? [b.x < -16 ? -1 : 1, 0] : [0, b.z > -36 ? 1 : -1]];
+    for (const [nx, nz] of faces) {
+      if (r() < 0.3) continue; // not every face catches the wind
+      const alongZ = nx !== 0;
+      const len = (alongZ ? b.d : b.w) * (0.75 + r() * 0.2);
+      if (len < 2.5) continue;
+      const depth = 1.4 + r() * 1.1;
+      const off = (alongZ ? b.w : b.d) / 2 + depth * 0.38;
+      const x = b.x + nx * off, z = b.z + nz * off;
+      const hx = alongZ ? depth / 2 : len / 2, hz = alongZ ? len / 2 : depth / 2;
+      if (clear.some(([px, pz, rad]) => Math.hypot(Math.max(0, Math.abs(px - x) - hx), Math.max(0, Math.abs(pz - z) - hz)) < rad)) continue;
+      // The decal's long axis is its local z: along a wall that runs in x, turn it.
+      out.push({ x, z, s: depth, l: len, ry: alongZ ? 0 : Math.PI / 2 });
+    }
+  }
+  return out;
+}
+
 function Wear({ level, phase }: { level: LevelDef; phase: Phase }) {
   const sets = useMemo(() => groundWear(level.id, phase).map((w, k) => {
     const r = rng(1000 + k * 77 + level.id.length);
@@ -480,12 +516,17 @@ function Wear({ level, phase }: { level: LevelDef; phase: Phase }) {
       color: puddle ? '#6a7682' : '#ffffff', polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
     });
     const items: { x: number; z: number; s: number; l: number; ry: number }[] = [];
-    for (let i = 0; i < w.count; i++) {
+    const banks = w.kind === 'sand' ? sandBanks(level, r) : [];
+    for (let i = 0; i < Math.max(w.count, banks.length); i++) {
       if (w.kind === 'tracks' && roads.length) {
         const rd = roads[i % roads.length];
         items.push({ x: rd.x + (r() - 0.5) * (rd.w ?? 6) * 0.5, z: rd.z + (r() - 0.5) * (rd.d ?? 30) * 0.8, s: 2.2, l: 9 + r() * 6, ry: (r() - 0.5) * 0.12 });
+      } else if (w.kind === 'sand' && i < banks.length) {
+        // A drift banked along the base of a real wall: long, a couple of metres
+        // deep, its near edge tucked under the wall's face.
+        items.push(banks[i]);
       } else if (w.kind === 'sand') {
-        // drifts pile against the fence lines and walls at the edges
+        // the rest pile against the fence lines at the edges
         const edge = r() < 0.5;
         const x = edge ? (r() < 0.5 ? b.minX + 1 + r() * 4 : b.maxX - 1 - r() * 4) : b.minX + r() * (b.maxX - b.minX);
         const z = edge ? b.minZ + r() * (b.maxZ - b.minZ) : (r() < 0.5 ? b.minZ + 1 + r() * 4 : b.maxZ - 1 - r() * 4);
@@ -510,7 +551,8 @@ function WearSet({ mat, items, tall }: { mat: THREE.Material; items: { x: number
     items.forEach((it, i) => {
       o.position.set(it.x, 0.018 + i * 0.0004, it.z);
       o.rotation.set(0, it.ry, 0);
-      o.scale.set(it.s, 1, tall ? it.l : it.s);
+      // `l` > 1 is a long decal (tyre tracks, a drift along a wall); otherwise square.
+      o.scale.set(it.s, 1, tall || it.l > 1 ? it.l : it.s);
       o.updateMatrix();
       m.setMatrixAt(i, o.matrix);
     });

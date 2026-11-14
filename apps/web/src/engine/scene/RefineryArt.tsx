@@ -3,7 +3,7 @@
 import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import type { LevelDef } from '../fps/levels';
-import { buildColumn, buildFlareStack, buildLoadingArm, buildRackDetail, buildTank, buildWallServices, mergeKit, type KitGeometry, type KitMaterial } from './refineryKit';
+import { buildColumn, buildFlareStack, buildLoadingArm, buildRackDetail, buildTank, buildWallServices, mergeKit, type Face, type KitGeometry, type KitMaterial } from './refineryKit';
 
 /**
  * The plant on a site, built from the level's own colliders by `refineryKit`: every
@@ -35,6 +35,19 @@ export function buildSiteKit(level: LevelDef): KitGeometry[] {
     if (b.kind === 'tank') parts.push(buildTank({ x: b.x, z: b.z, size: b.w, height: b.h, stairCorner: stairCornerFor(b.x, b.z) }));
     else if (b.kind === 'column') parts.push(buildColumn({ x: b.x, z: b.z, size: b.w, height: b.h }));
     else if (b.kind === 'pipe_rack') parts.push(buildRackDetail({ x: b.x, z: b.z, w: b.w, d: b.d, h: b.h }));
+  }
+  if (level.id === 'blacksite') {
+    // A serviced facility: cable trays, conduit drops, horns and floodlights on the
+    // perimeter wall's courtyard faces and down both sides of the main corridor.
+    let seed = 11;
+    for (const w of level.walls) {
+      if (w.kind === 'concrete' && Math.max(w.w, w.d) >= 18) {
+        const face: Face = w.d > w.w ? (w.x < 0 ? '+x' : '-x') : (w.z > 0 ? '-z' : '+z');
+        parts.push(buildWallServices({ x: w.x, z: w.z, w: w.w, d: w.d, h: w.h, face }, seed++));
+      } else if (w.kind === 'interior' && Math.abs(Math.abs(w.x) - 2) < 0.01 && w.d >= 8) {
+        parts.push(buildWallServices({ x: w.x, z: w.z, w: w.w, d: w.d, h: w.h, face: w.x < 0 ? '+x' : '-x' }, seed++));
+      }
+    }
   }
   if (level.id === 'cinder_yard') {
     for (const a of level.art) if (a.kind === 'stack') parts.push(buildFlareStack({ x: a.x, z: a.z, height: a.h ?? 22 }));

@@ -57,6 +57,23 @@ The gameplay rule is tested (`refineryKit.test.ts`): nothing below head height l
 its collider's footprint, so no invisible walls and no walking through geometry;
 module triangle budgets are pinned.
 
+## Stage D: Dustline and Blacksite identity
+
+The same kit pipeline, a different prop language per site, merged into the existing
+per-material meshes (Dustline 286 → 286 draws, Blacksite 292 → 294).
+
+- **Blacksite, a serviced facility.** Cable trays with brackets, conduit drops to
+  junction boxes, horn speakers and bracket floodlights run down both sides of the
+  main corridor and along the perimeter wall's courtyard faces, all above head height
+  (`buildWallServices`, the footprint rule tested). The corridor now recedes toward
+  the vault as a working building rather than a grey tube, at day and at night.
+- **Dustline, exposure.** Windblown sand banks along the bases of the containers and
+  the warehouse's outward walls (`sandBanks` in `SiteDressing.tsx`): soft ground
+  decals on the wear layer, not geometry, so there is nothing to trip on. A first
+  attempt with leaning kit slabs read as grey planks in the captures and was removed.
+  Tested: banks run along real walls and never lie over a pickup, objective, cargo
+  case or the extraction zone.
+
 ## Stage E (partial): enemies and the HUD
 
 - Enemy rifles get the same `finishWeapon` surface pass as the player's weapons.
@@ -81,8 +98,8 @@ machines down, and the Low/touch tiers keep the primitive stand-ins.
 
 ## Remaining limitations
 
-- Dustline and Blacksite have not had their Stage D identity pass on this branch
-  (they keep the earlier environment work plus the foundation improvements here).
+- Stage D is a detail pass, not a re-layout: Dustline and Blacksite keep their
+  geometry; the sand drifts are subtle at gameplay distance.
 - Enemy animation set is unchanged (Mixamo locomotion; no new hit-reaction blending).
 - The viewmodel hands are posed, not skinned-animated; the reload is staged motion.
 - Real-device frame times are still unmeasured (M2 + emulation only).

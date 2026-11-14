@@ -384,6 +384,9 @@ export function buildWallServices(w: WallSpec, seed = 1): KitGeometry {
   return out;
 }
 
+/** Which face of a box a wall-mounted module hangs on. */
+export type Face = '+x' | '-x' | '+z' | '-z';
+
 /** Merge a list of kit geometries into one BufferGeometry per material. */
 export function mergeKit(parts: KitGeometry[]): Partial<Record<KitMaterial, THREE.BufferGeometry>> {
   const by: KitGeometry = {};
