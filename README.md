@@ -13,9 +13,10 @@ Built for the **NEAR Hackathon (November 2026)**, track **Games With Real Econom
 
 | | |
 |---|---|
-| **Play** | Run locally ([Quickstart](#quickstart)). A public deployment isn't live yet ([DEPLOY.md](docs/contract-zero/DEPLOY.md)) |
+| **Play** | **<https://contract-zero.vercel.app>**: Training needs no account; contracts need a NEAR testnet wallet ("I already have a NEAR wallet"). Or run it locally ([Quickstart](#quickstart)) |
 | **Learn to play** | [Player's Field Manual](docs/PLAYER_GUIDE.md) · [Controls](docs/CONTROLS.md) |
-| **Watch** | [Demo script](docs/contract-zero/DEMO.md). The automated, recorded run of all 16 steps is reproducible with `apps/web/demo-run.mjs` ([last report](docs/contract-zero/demo/report-2026-11-09.json)) |
+| **Watch** | [Demo script](docs/contract-zero/DEMO.md). The automated, recorded run of all 16 steps is reproducible with `apps/web/demo-run.mjs` ([last report](docs/contract-zero/demo/report-2026-11-09.json)). Radio voices, as heard in game: [docs/contract-zero/voice](docs/contract-zero/voice) |
+| **Submission** | [SUBMISSION.md](docs/SUBMISSION.md): the one-page summary |
 | **Verify on NEAR** | [`assets.contract-zero.testnet`](https://testnet.nearblocks.io/address/assets.contract-zero.testnet) (NEP-245 ledger) · [`world2.contract-zero.testnet`](https://testnet.nearblocks.io/address/world2.contract-zero.testnet) (game controller) · [evidence](docs/contract-zero/NEAR.md) |
 | **Read the design** | [DESIGN.md](docs/contract-zero/DESIGN.md) · [Economy](docs/contract-zero/ECONOMY.md) · [Supply orders and NEAR Intents](docs/contract-zero/INTENTS.md) · [Missions](docs/contract-zero/MISSIONS.md) |
 
@@ -198,9 +199,10 @@ flowchart LR
   P[Player] --> W[Next.js 15 + React Three Fiber<br/>FPS scene, HUD, Exchange, War Room]
   W -->|session cookie| API[Rust API, Actix<br/>auth, missions, event protocol, market]
   API --> E[cz-economy<br/>deterministic engine]
-  API --> AG[Agents: deterministic policies<br/>+ optional NEAR AI planner]
+  API --> AG[Agents: deterministic policies<br/>+ NEAR AI planner]
   AG --> E
   API --> DB[(PostgreSQL)]
+  API --> V[Voice service<br/>Kokoro TTS, private]
   API --> SW[Settlement worker]
   SW --> C[world2 controller] --> L[assets NEP-245 ledger]
   API --> IA[NEAR Intents 1Click adapter]
@@ -209,12 +211,19 @@ flowchart LR
 **The client and the server do different jobs:**
 - **The client** (`apps/web`) runs the gunfight: deterministic combat AI, no LLM. It streams mission events.
 - **The server** (`apps/api`) checks each run: timing, movement, reach and holds. Only the server turns an outcome into goods.
+- **The server also writes the characters' radio dialogue:**
+  - **Mission lines** (authored, or rewritten by NEAR AI and checked).
+  - **Strategic radio:** lines built from its own records of faction decisions and merchant fills.
+  - **Voicing:** each line is spoken by the private voice service (`apps/tts`, Kokoro-82M, Apache-2.0) and cached. Authored lines are pre-voiced.
+  - **One source of truth:** the caption and the voice are always the same text, and there is never synthetic gibberish.
+- **The browser reaches the API through the site's own `/api` route,** so the session cookie is first-party. Brave and Safari block third-party cookies.
 
 ```text
 apps/web            Next.js 15, React Three Fiber: the game, the HUD, every page
   src/engine/fps      headless FPS sim, missions, field objects, levels
   src/engine/scene    the 3D scene (ContractZeroScene)
   src/lib             settings, key bindings, controls (one definition), auth, API client
+apps/tts            the voice service: Kokoro TTS (Python), and pregen.py for authored lines
 apps/api            Rust, Actix-web, PostgreSQL
   crates/economy      the deterministic world: ledger, pricing, missions, orders, agent policies
   src/                API, mission protocol, settlement worker, NEAR client, planner, 1Click adapter
@@ -270,8 +279,9 @@ cd ../cz-assets               && cargo test && RUSTUP_TOOLCHAIN=stable cargo nea
 
 | What | Command | Last result |
 |---|---|---|
-| Web unit tests, types | `cd apps/web && npx vitest run && npx tsc --noEmit -p .` | 515 tests pass |
-| Economy and API | `cd apps/api && cargo test --workspace` (add `CZ_DB_TESTS=1` for the database tests) | all pass |
+| Web unit tests, types | `cd apps/web && npx vitest run && npx tsc --noEmit -p .` | 946 tests pass |
+| Economy and API | `cd apps/api && cargo test --workspace` (add `CZ_DB_TESTS=1` for the database tests) | all pass (API 64, economy 114) |
+| API reliability: concurrent mission events, extraction and death; lock timeouts; dropped connections; NEAR RPC down | `node apps/api/scripts/reliability.mjs` against an off-chain API on a scratch database | all pass |
 | Contracts | `cargo test` in `contracts-near/cz-assets` and `contracts-near/cz-world-v2` | 28 and 58 pass |
 | Controls documentation in sync | part of the web tests (`controlsDoc.test.ts`) | passes |
 
@@ -279,6 +289,9 @@ These need a running API and web app:
 | What | Command | Last result |
 |---|---|---|
 | Browser: accessibility | `node apps/web/probe-a11y.mjs` | WCAG 2.1 A/AA clean on every page and settings category |
+| Every probe group: layout, standards, subtitles, presets, budgets, catwalk, War Table… | `node apps/web/probe-all.mjs` | 12/12 groups |
+| The deployed site, desktop and phone | `node apps/web/probe-prod-smoke.mjs` | 52/52 |
+| Radio voices: clean, combat, strategic, failed | `node apps/web/probe-voice-record.mjs` | recordings in [docs/contract-zero/voice](docs/contract-zero/voice) |
 | Browser: settings, pause menu, market UI, help | `node apps/web/probe-config.mjs`, `probe-pause.mjs`, `probe-market.mjs`, `probe-docs.mjs` | 40/40, 9/9, 14/14, 19/19 |
 | The recorded demo, all 16 steps | `node apps/web/demo-run.mjs` | 16/16, 0 page errors ([report](docs/contract-zero/demo/report-2026-11-09.json)) |
 
@@ -303,15 +316,17 @@ These need testnet settlement and the test player's key (maintainers):
 | Economy, autonomous factions and merchants, supply orders with competing merchants | **Verified** (engine tests; live on testnet) |
 | On-chain settlement, reconciliation, quick trade, wallet sign-in | **Verified on testnet** |
 | Settings: graphics, audio, controls and key bindings, accessibility, account sync; Field Manual and first-time tips | **Verified** in the browser |
-| Google, email or passkey sign-in (NEAR Auth) | **Built.** Verified up to NEAR's hosted login; a complete Google login needs a human account. The shared testnet client accepts only `localhost:3000` |
+| Google, email or passkey sign-in (NEAR Auth) | **Built.** Works locally on `localhost:3000`; on the live site it needs this app's own NEAR Auth credentials (NEAR's shared test client accepts only localhost). Wallet sign-in works on the live site |
 | NEAR Intents (official, 1Click) | **Read-only, verified** (live dry quotes). **Mainnet execution is prepared but not yet run** |
-| NEAR AI strategic planner | **Built**, off until the NEAR AI account has credits |
-| Public deployment | **Prepared** ([DEPLOY.md](docs/contract-zero/DEPLOY.md)), not yet live. The API container image hasn't been build-tested on this machine |
+| NEAR AI strategic planner and mission dialogue | **Live.** Factions plan with NEAR AI when their situation materially changes, under a daily call cap. Mission dialogue is rewritten and checked line by line. The deterministic policies always run |
+| Character voices | **Live.** Five distinct voices; authored lines pre-voiced; mission and strategic lines voiced by the server. A line without its voice in time is subtitle only |
+| Public deployment | **Live:**<br>• **Web:** <https://contract-zero.vercel.app>, on Vercel.<br>• **API:** Railway, EU West.<br>• **Voice service:** Railway.<br>• **Database:** Supabase.<br>• **Settlement:** NEAR testnet.<br>See [DEPLOY.md](docs/contract-zero/DEPLOY.md) |
 | Seasonal Campaign | **Planned** |
 
 **Known limitations:**
 - The 3D fight isn't usable with a screen reader; the rest of the UI is.
-- Only Chrome and Chromium have been tested.
+- Tested in Chrome, including the deployed site at phone size. Brave and Safari now get a first-party session cookie, but haven't been played through end to end.
+- New voices take about 11 s to synthesize on the hosting CPU. Lines are voiced ahead of time where they can be known; one not ready in time plays as its subtitle.
 - Order and proposal records stay on chain as replay protection and evidence. Mainnet would need a storage-deposit model ([INTENTS.md](docs/contract-zero/INTENTS.md)).
 
 ## Contributing and attribution
