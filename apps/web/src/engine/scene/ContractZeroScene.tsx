@@ -4,8 +4,8 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { AdaptiveDpr } from '@react-three/drei';
 import { AutoQuality, readAutoLevel, writeAutoLevel, type AutoLevel } from '../perf/autoQuality';
-import { EffectComposer, Bloom, Noise, Vignette, ChromaticAberration, N8AO } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
+import { EffectComposer, Bloom, Noise, Vignette, ChromaticAberration, N8AO, ToneMapping, SMAA } from '@react-three/postprocessing';
+import { BlendFunction, ToneMappingMode } from 'postprocessing';
 import * as THREE from 'three';
 import { usePbr } from './usePbr';
 import { makeTriplanarMaterial } from './triplanar';
@@ -14,6 +14,7 @@ import { buildZoneEnvironment, ENV_INTENSITY } from './zoneEnvironment';
 import { ImpactFX, type ImpactSurface } from '../vfx/ImpactFX';
 import { useImpactTextures } from '../vfx/useImpactTextures';
 import { DroppedWeapon } from '../vfx/DroppedWeapon';
+import { ShellCasings } from '../vfx/ShellCasings';
 import {
   FpsSim,
   xpForKill, rankForXp, xpIntoRank, xpBarSize, rankUpsBetween, careerXpFor, XP_REWARD, rayAABB, aabbOfCover, slideMove, type FpsInput, type Vec3, type Rank, type Attachment,
@@ -105,6 +106,24 @@ const PITCH_LIMIT = 1.45;       // ~83°
 
 const RECOIL_RECOVER = 12;     // per second
 const BOB = 0.014;
+/** Eye relief to an optic's emitter when aimed: where the red dot sits ahead of the eye. */
+const SIGHT_RELIEF = 0.3;
+/**
+ * The filmic curve and base exposure.
+ *
+ * The renderer's own tone mapping only applies when it draws to the canvas. Under
+ * a post-processing composer the scene is rendered to a float buffer and the final
+ * pass is NOT tone mapped, so the full and light stacks were showing raw linear
+ * light clipped to white (measured: changing the renderer's curve or exposure did
+ * nothing with a composer mounted, and everything without one). The composer stacks
+ * therefore carry a ToneMapping pass of the same curve, and the renderer keeps it
+ * for the tier with no composer, so every tier sees the same image.
+ */
+type ToneCurve = 'aces' | 'agx' | 'neutral';
+const TONE_CURVE: ToneCurve = 'aces';
+const BASE_EXPOSURE = 1.32;
+const TONE_THREE: Record<ToneCurve, THREE.ToneMapping> = { aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping };
+const TONE_PP: Record<ToneCurve, ToneMappingMode> = { aces: ToneMappingMode.ACES_FILMIC, agx: ToneMappingMode.AGX, neutral: ToneMappingMode.NEUTRAL };
 
 // The two viewmodel framings moved to scene/viewmodelHands as VIEWMODEL_HIP /
 // VIEWMODEL_ADS, so the grip bench can frame a weapon identically to the game.
@@ -910,8 +929,33 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   // ── Player look / motion state (imperative — no React churn per frame) ──
   const yaw = useRef(0);
   const pitch = useRef(0);
+  /** The curve and exposure in force. Dev builds take ?tm=aces|agx|neutral&exp=1.2 to compare curves from one frame. */
+  const tone = useMemo(() => {
+    let curve: ToneCurve = TONE_CURVE, exposure = BASE_EXPOSURE;
+    if (DEV_HOOKS && typeof window !== 'undefined') {
+      const q = new URLSearchParams(window.location.search);
+      const tm = q.get('tm');
+      if (tm === 'aces' || tm === 'agx' || tm === 'neutral') curve = tm;
+      if (q.get('exp')) exposure = Number(q.get('exp'));
+    }
+    return { curve, exposure };
+  }, []);
+  const devToneMap = useRef<{ mode: THREE.ToneMapping; exposure: number } | null>(null);
+  useEffect(() => {
+    devToneMap.current = { mode: TONE_THREE[tone.curve], exposure: tone.exposure };
+    gl.toneMapping = TONE_THREE[tone.curve];
+  }, [gl, tone]);
   const recoilP = useRef(0);
   const recoilY = useRef(0);
+  /** The weapon's own kick (back and up), a faster spring than the camera's recoil. */
+  const vmKick = useRef(0);
+  /** Look lag: the weapon trails a turn and catches up. */
+  const lagYaw = useRef(0);
+  const lagPitch = useRef(0);
+  const prevYaw = useRef(0);
+  const prevPitch = useRef(0);
+  /** Movement weight, ramped so the bob eases in and out rather than popping. */
+  const moveAmt = useRef(0);
   const pos = useRef(new THREE.Vector3(START[0], EYE_STAND, START[1]));
   const adsCur = useRef(0);
   const leanCur = useRef(0);
@@ -931,6 +975,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const colourOnly = lowSpec || minimal;
   const floorMaps = usePbr('burned_ground_01', [12, 20], undefined, colourOnly);
   const hardstandingMaps = usePbr('concrete_floor_worn_001', [1, 1], '/textures/hangar', colourOnly);
+  // The road, laid into the ground shader rather than a slab on top of it.
+  const roadMaps = usePbr('asphalt_02', [1, 1], '/textures/hangar', colourOnly);
+  const roadRects = useMemo(() => (LEVEL ? LEVEL.art.filter((a) => a.kind === 'road').map((a) => ({ x: a.x, z: a.z, w: a.w ?? 6, d: a.d ?? 40 })) : []), [LEVEL]);
   const brickMaps = usePbr('broken_brick_wall', [7, 1.6], undefined, colourOnly);
   const plasterMaps = usePbr('damaged_plaster', [4, 1.4], undefined, colourOnly);
   const plankMaps = usePbr('black_painted_planks', [1, 1], undefined, colourOnly);
@@ -968,7 +1015,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     [minimal],
   );
   const shellMaterials = useMemo(() => ({
-    floor: makeSiteGround(floorMaps, hardstandingMaps, LEVEL?.id, theme.floorTint, minimal),
+    floor: makeSiteGround(floorMaps, hardstandingMaps, LEVEL?.id, theme.floorTint, minimal, roadMaps, roadRects),
     brick: makeTriplanarMaterial(brickMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.7, detail: 9.3, detailAmount: 0.62, macro: 0.13, macroAmount: 0.3, ...octaves }),
     plaster: makeTriplanarMaterial(plasterMaps, { color: theme.wallTint, roughness: 1, metalness: 0 }, { metresPerTile: 1.8, detail: 8.7, detailAmount: 0.68, macro: 0.13, macroAmount: 0.32, ...octaves }),
     // Cover boxes are the surface you are most often pressed right up against —
@@ -996,7 +1043,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // The cap on top of a wall. Was a flat grey box, which read as the graybox it
     // was; concrete at a coarse tile makes it a poured coping instead.
     coping: makeTriplanarMaterial(plasterMaps, { color: '#59565e', roughness: 0.9, metalness: 0 }, { metresPerTile: 1.3, detail: 9.1, detailAmount: 0.5, ...octaves }),
-  }), [floorMaps, hardstandingMaps, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves, LEVEL?.id, minimal]);
+  }), [floorMaps, hardstandingMaps, roadMaps, roadRects, brickMaps, plasterMaps, plankMaps, theme.floorTint, theme.wallTint, octaves, LEVEL?.id, minimal]);
 
   /**
    * Set-dressing surfaces.
@@ -1311,6 +1358,15 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       // would be measured as part of the weapon.
       const hands = buildViewmodelHands(id, g, GUN_LENGTH[id]);
       g.add(hands);
+      // A weapon with an optic records where its emitter sits (in the viewmodel's
+      // frame, after the turn above), so aiming can put that point on the eye line.
+      const reticle = g.getObjectByName('reticle');
+      if (reticle) {
+        g.updateMatrixWorld(true);
+        // The emitter is baked into its mesh's geometry (the mesh sits at the weapon's
+        // origin), so its place is the geometry's centre, not the node's position.
+        g.userData.sightOffset = new THREE.Box3().setFromObject(reticle).getCenter(new THREE.Vector3());
+      }
       out[id] = g;
     }
     return out;
@@ -1346,6 +1402,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   // The falling weapon's physics (engine/vfx/DroppedWeapon). `active` also drives
   // whether the viewmodel is drawn, so the gun is never in two places at once.
   const dropPhysics = useRef(new DroppedWeapon({ restY: DROP_REST_Y }));
+  /** Spent brass, one instanced mesh for the fight. */
+  const casings = useMemo(() => new ShellCasings(), []);
+  useEffect(() => () => casings.dispose(), [casings]);
   const dropId = useRef<GunId | null>(null);
 
   // The active weapon's muzzle (tracers / flash / laser spawn here); repointed on
@@ -1555,6 +1614,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       };
     };
     w.__czWarp = (x: number, z: number) => { pos.current.set(x, EYE_STAND, z); };
+    w.__czToneMap = () => ({ toneMapping: gl.toneMapping, exposure: gl.toneMappingExposure, dev: devToneMap.current, post: plan.post });
     // A walkable route from the player to a point (the autopilot follows it at walking pace).
     w.__czPath = (x: number, z: number) => sim.pathBetween(pos.current.x, pos.current.z, x, z);
     w.__czLook = (y: number, p = 0) => { yaw.current = y; pitch.current = p; };
@@ -1994,33 +2054,73 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
      * the sights need and roughly what actually happens to your view of them.
      */
     const handsGroup = activeMesh.getObjectByName('hands');
-    if (handsGroup) handsGroup.visible = adsCur.current < 0.45;
+    // Hands stay in the picture when aimed. With a sight line (the carbine's red dot, or
+    // an authored aimed pose) the firing hand sits under the receiver and the support
+    // hand under the handguard, both below the dot (checked in probe-viewmodel). Only a
+    // weapon aimed through the shared gentle raise tucks them away, where the grip
+    // would otherwise cover the aim.
+    const sight = activeMesh.userData.sightOffset as THREE.Vector3 | undefined;
+    if (handsGroup) handsGroup.visible = !!sight || !!view.ads || adsCur.current < 0.45;
     // Shouldered, the stock is under the cheek: drawn, it was a slab across the sight picture.
     const stockNode = activeMesh.getObjectByName('stock');
     if (stockNode) stockNode.visible = adsCur.current < 0.45;
     const reload = reloadPose((sim.time - reloadStartedAt.current) / sim.gun.reloadTime, sim.reloading, !!settingsRef?.current.access.reduceMotion);
     const magazine = activeMesh.getObjectByName('magazine');
-    if (magazine) magazine.position.y = -reload.magazineDrop;
+    if (magazine) {
+      // Out of the well: down, a little forward, tipping as it clears.
+      magazine.position.set(0, -reload.magazineDrop, reload.magazineDrop * 0.3);
+      magazine.rotation.x = reload.magazineDrop * 1.8;
+    }
     const support = handsGroup?.getObjectByName('support-hand');
-    if (support && typeof support.userData.restY === 'number') support.position.y = support.userData.restY - reload.handReach;
+    if (support && typeof support.userData.restY === 'number') {
+      if (typeof support.userData.restZ !== 'number') support.userData.restZ = support.position.z;
+      // The support hand leaves the handguard for the magazine well, behind it and lower.
+      support.position.y = support.userData.restY - reload.handReach * 0.7;
+      support.position.z = (support.userData.restZ as number) - reload.handReach * 1.1;
+    }
     swapRaise.current = Math.max(0, swapRaise.current - dt * 2.4);
     const vm = vmRef.current;
     // While the weapon is on the deck it must not also be in your hands.
     if (vm) vm.visible = !dropPhysics.current.active;
     if (vm) {
-      const local = tmp.copy(VIEWMODEL_HIP).lerp(VIEWMODEL_ADS, adsCur.current);
+      const calmK = settingsRef?.current.access.reduceMotion ? 0 : 1;
+      // Eased aim blend: the weapon comes up quickly and settles into the shoulder.
+      const ads = adsCur.current, ease = ads * ads * (3 - 2 * ads);
+      const local = tmp.copy(VIEWMODEL_HIP).lerp(VIEWMODEL_ADS, ease);
       local.z += view.z; local.y += view.y;                 // where this weapon sits
-      if (view.ads) {
-        // A weapon with a real sight line: from its own hip pose to its shouldered one.
+      if (sight) {
+        // An optic: aimed, its emitter sits on the eye line at a fixed eye relief, so
+        // you look through the glass to the dot whatever the model's proportions.
+        adsTarget.set(-sight.x, -sight.y, -SIGHT_RELIEF - sight.z);
+        local.set(VIEWMODEL_HIP.x, VIEWMODEL_HIP.y + view.y, VIEWMODEL_HIP.z + view.z).lerp(adsTarget, ease);
+      } else if (view.ads) {
+        // A weapon with an authored sight line: from its own hip pose to its shouldered one.
         local.set(VIEWMODEL_HIP.x, VIEWMODEL_HIP.y + view.y, VIEWMODEL_HIP.z + view.z)
-          .lerp(adsTarget.set(...view.ads), adsCur.current);
+          .lerp(adsTarget.set(...view.ads), ease);
       }
-      // bob: a gentle walk figure-8 on the viewmodel when moving
-      const bob = BOB * (moving ? 1 : 0) * (settingsRef?.current.access.reduceMotion ? 0 : 1);
-      local.x += Math.sin(bobPhase.current) * bob;
-      local.y += Math.abs(Math.cos(bobPhase.current)) * bob;
+      // Walk bob: a figure-8, eased in and out with movement and damped when aimed.
+      moveAmt.current += ((moving ? 1 : 0) - moveAmt.current) * Math.min(1, dt * 8);
+      const bobK = BOB * moveAmt.current * calmK * (1 - 0.7 * ease);
+      local.x += Math.sin(bobPhase.current) * bobK;
+      local.y += Math.abs(Math.cos(bobPhase.current)) * bobK;
+      // Breathing at rest.
+      local.y += Math.sin(swayT.current * 0.9) * 0.0018 * calmK * (1 - ease);
       local.y -= swapRaise.current * 0.22;                  // dips down as it's raised
-      local.z += recoilP.current * 2.2; // kick back toward the camera on fire
+      local.y += reload.bump - reload.dip;
+      local.x += reload.shift;                              // brought in to where you look at it
+      // Look lag: the weapon trails a turn and catches up. Driven by the turn RATE so
+      // it reads the same at any frame rate; near-still when aimed.
+      const dYaw = angleDiff(yaw.current, prevYaw.current), dPitch = pitch.current - prevPitch.current;
+      prevYaw.current = yaw.current; prevPitch.current = pitch.current;
+      const lagK = Math.min(1, dt * 11), lagScale = calmK * (1 - 0.8 * ease);
+      const rateY = dt > 0 ? dYaw / dt : 0, rateP = dt > 0 ? dPitch / dt : 0;
+      lagYaw.current += (THREE.MathUtils.clamp(rateY * 0.012, -0.06, 0.06) - lagYaw.current) * lagK;
+      lagPitch.current += (THREE.MathUtils.clamp(rateP * 0.012, -0.05, 0.05) - lagPitch.current) * lagK;
+      local.x += lagYaw.current * 0.5 * lagScale;           // turning right: the weapon swings left
+      local.y -= lagPitch.current * 0.35 * lagScale;        // looking up: it hangs back down
+      // The kick: back along the barrel, from the weapon's own spring plus the camera's.
+      vmKick.current += (0 - vmKick.current) * Math.min(1, dt * 16);
+      local.z += vmKick.current * 0.9 + recoilP.current * 1.2;
       // Near-wall presentation follows the camera ray against the actual colliders.
       // Keep the stock ahead of the eye and lower the muzzle as the wall approaches.
       cam.getWorldDirection(fwd);
@@ -2034,12 +2134,15 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       const GUN_CLEAR = 1.1; // begin lowering inside this distance
       // Lower the muzzle rather than pushing the stock through the eye plane.
       const wallLower = 1 - THREE.MathUtils.clamp(wallAhead / GUN_CLEAR, 0, 1);
-      local.y -= wallLower * 0.14 + reload.dip;
-      local.z = safeWeaponDepth(local.z, GUN_LENGTH[activeId], view.scale, view.ads ? 0 : adsCur.current);
+      local.y -= wallLower * 0.14;
+      local.z = safeWeaponDepth(local.z, GUN_LENGTH[activeId], view.scale, (view.ads || sight) ? 0 : adsCur.current);
       vm.position.copy(cam.localToWorld(local));
       vm.quaternion.copy(cam.quaternion);
-      vm.rotateX(-recoilP.current * 1.6 - wallLower * 0.65);
-      vm.rotateZ(reload.roll);
+      // Nose up on the kick, down against a wall, trailing the pitch; yaw trails the
+      // turn and the reload swings the well toward you; a little roll with the stride.
+      vm.rotateX(vmKick.current * 2.2 - recoilP.current * 0.6 - wallLower * 0.65 - lagPitch.current * 0.8 * lagScale);
+      vm.rotateY(-lagYaw.current * 1.1 * lagScale + reload.yaw);
+      vm.rotateZ(reload.roll + lagYaw.current * 0.6 * lagScale + Math.sin(bobPhase.current) * 0.012 * moveAmt.current * calmK * (1 - ease));
       vm.updateMatrixWorld();
     }
 
@@ -2048,7 +2151,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // NVG lifts the exposure (and the HUD tints green) so the dark reads — unless
     // this op is a BLACKOUT (NVG jammed), where the dark is the whole point.
     nvgAmt.current += (((sim.hasAttachment('nvg') && !blackout) ? 1 : 0) - nvgAmt.current) * Math.min(1, dt * 8);
-    gl.toneMappingExposure = 1.32 + nvgAmt.current * 1.7; // brighter base; NVG lifts further
+    gl.toneMappingExposure = (devToneMap.current?.exposure ?? BASE_EXPOSURE) * (theme.exposure ?? 1) + nvgAmt.current * 1.7; // the hour's exposure; NVG lifts further
+    if (devToneMap.current && gl.toneMapping !== devToneMap.current.mode) gl.toneMapping = devToneMap.current.mode;
     // Optic deepens the ADS zoom (narrower FOV); no optic = a gentler aim zoom.
     const fovTarget = THREE.MathUtils.lerp(settingsRef?.current.fov ?? 55, sim.hasAttachment('optic') ? 30 : 45, adsCur.current);
     if (Math.abs(cam.fov - fovTarget) > 0.02) { cam.fov = fovTarget; cam.updateProjectionMatrix(); }
@@ -2137,11 +2241,31 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         muzzleRef.current.getWorldPosition(tmp2);
         // Reduced flashes: automatic fire would otherwise flicker the whole scene ~10×/s.
         if (muzzleLight.current) { muzzleLight.current.position.copy(tmp2); muzzleLight.current.intensity = feel.lightIntensity * (settingsRef?.current.access.reduceFlashes ? 0.25 : 1); }
-        if (flashRef.current) { flashRef.current.position.copy(tmp2); flashRef.current.visible = true; flashRef.current.scale.setScalar(0.18 * feel.flashScale * (0.8 + Math.random() * 0.5)); }
-        flashUntil.current = now + 0.045;
+        // The flash card faces the eye, a hair ahead of the muzzle, rolled at random so
+        // no two shots stamp the same star; the smoke and embers come from ImpactFX.
+        cam.getWorldDirection(fwd);
+        if (flashRef.current) {
+          flashRef.current.position.copy(tmp2).addScaledVector(fwd, 0.06);
+          flashRef.current.quaternion.copy(cam.quaternion);
+          flashRef.current.rotateZ(Math.random() * Math.PI * 2);
+          flashRef.current.visible = true;
+          flashRef.current.scale.setScalar(0.2 * feel.flashScale * (0.8 + Math.random() * 0.5));
+        }
+        flashUntil.current = now + 0.05;
+        const reduceFlashes = !!settingsRef?.current.access.reduceFlashes;
+        if (plan.particles && !reduceFlashes) impactFx.muzzle([tmp2.x, tmp2.y, tmp2.z], [fwd.x, fwd.y, fwd.z], feel.flashScale);
+        // Brass out of the port: behind the muzzle on the weapon's right, thrown right and up.
+        if (vmRef.current && sim.gun.id !== 'legendary' && plan.particles) {
+          const q = vmRef.current.quaternion;
+          const right = tmp.set(1, 0, 0).applyQuaternion(q);
+          const up = adsTarget.set(0, 1, 0).applyQuaternion(q);
+          const port = tmp2.clone().addScaledVector(fwd, -GUN_LENGTH[sim.gun.id] * 0.52).addScaledVector(right, 0.03).addScaledVector(up, 0.015);
+          casings.eject(port, right, up, fwd, 0.7 + 0.6 * feel.kick);
+        }
         const kick = 0.02 * feel.kick * (1 - 0.4 * adsCur.current);
         recoilP.current += kick;
         recoilY.current += (Math.random() - 0.5) * kick * 0.5;
+        vmKick.current += 0.045 * feel.kick * (1 - 0.3 * adsCur.current) * (settingsRef?.current.access.reduceMotion ? 0.4 : 1);
         audio.shot((GUN_FEEL[sim.gun.id] ?? feel).audio); // the ACTIVE weapon's voice, not just the primary's
       } else if (ev.kind === 'hit' || ev.kind === 'wall' || ev.kind === 'miss') {
         muzzleRef.current.getWorldPosition(tmp2);
@@ -2305,6 +2429,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     // the rest of the atmosphere — it is the definition of a nice-to-have.
     if (plan.particles) impactFx.ambient(dt, [pos.current.x, pos.current.y, pos.current.z]);
     impactFx.update(dt);
+    casings.floorAt = (x, z) => (LEVEL ? groundHeight(LEVEL, x, z, standOn.current) : 0);
+    casings.update(dt);
     stepDroppedWeapon(dt);
     stepEnemyDrops(dt);
 
@@ -3735,10 +3861,12 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       <directionalLight
         ref={sunRef}
         position={LEVEL ? [levelCx + 22, 34, levelCz + 26] : [9, 16, 10]} intensity={theme.sun.intensity} color={theme.sun.color} castShadow={plan.shadows}
-        shadow-mapSize={[lightFx ? 1024 : 2048, lightFx ? 1024 : 2048]}
+        // The map spans up to 100 m of site. 3072 on the full tier is a 3 cm texel
+        // (crisp contact under a barrier); 2048 on medium, 1024 on the light tiers.
+        shadow-mapSize={[lightFx ? 1024 : plan.post === 'full' ? 3072 : 2048, lightFx ? 1024 : plan.post === 'full' ? 3072 : 2048]}
         shadow-camera-left={-(LEVEL?.shadowHalf ?? 22)} shadow-camera-right={LEVEL?.shadowHalf ?? 22}
         shadow-camera-top={LEVEL?.shadowHalf ?? 22} shadow-camera-bottom={-(LEVEL?.shadowHalf ?? 22)}
-        shadow-camera-far={LEVEL ? 140 : 70} shadow-bias={-0.0008}
+        shadow-camera-far={LEVEL ? 140 : 70} shadow-bias={-0.0004} shadow-normalBias={0.025}
       />
       {/* The sun's aim point. Authored ops all fit inside the shadow camera's ±22
           box around the origin, but an endless run walks hundreds of metres past it,
@@ -3900,10 +4028,11 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
       {/* muzzle flash + light */}
       <pointLight ref={muzzleLight} distance={9} decay={2} intensity={0} color="#ffd39a" />
-      <mesh ref={flashRef} visible={false}>
-        <sphereGeometry args={[1, 8, 6]} />
-        <meshBasicMaterial color="#ffdca0" transparent opacity={0.9} />
+      <mesh ref={flashRef} visible={false} renderOrder={4} frustumCulled={false}>
+        <planeGeometry args={[1, 1]} />
+        <meshBasicMaterial map={impactMaps.flash} color="#ffd9a6" transparent opacity={0.95} blending={THREE.AdditiveBlending} depthWrite={false} />
       </mesh>
+      <primitive object={casings.mesh} />
 
       {/* enemy muzzle flashes + shared light */}
       <pointLight ref={eLight} distance={11} decay={2} intensity={0} color="#ffd089" />
@@ -3952,14 +4081,20 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           flavour; a playable frame rate is not. */}
       {plan.post === 'off' ? null : (plan.post === 'light' || endless) ? (
         <EffectComposer multisampling={0}>
+          <ToneMapping mode={TONE_PP[tone.curve]} />
+          <SMAA />
           <ChromaticAberration offset={caOffset} radialModulation modulationOffset={0.35} blendFunction={BlendFunction.NORMAL} />
           <Vignette darkness={0.5} offset={0.3} blendFunction={BlendFunction.NORMAL} />
         </EffectComposer>
       ) : LEVEL ? (
-        // Structured levels: bloom for the practicals, but no N8AO. Its normal pass
-        // re-renders a 60 m level every frame for contact shadows the sun map gives anyway.
-        <EffectComposer multisampling={0}>
-          {mission.zone !== 'DUSTLINE' ? <Bloom intensity={0.22} luminanceThreshold={0.85} luminanceSmoothing={0.2} mipmapBlur /> : <></>}
+        // Structured levels, full tier: half-resolution ambient occlusion (contact under
+        // every barrier, pipe and vehicle the sun map cannot give), bloom for the
+        // practicals, the filmic curve, then anti-aliasing and the lens.
+        <EffectComposer multisampling={0} enableNormalPass>
+          <N8AO aoRadius={1.1} intensity={1.8} distanceFalloff={1.2} quality="performance" halfRes color="#0a0b10" />
+          <Bloom intensity={mission.zone !== 'DUSTLINE' ? 0.22 : 0.12} luminanceThreshold={0.85} luminanceSmoothing={0.2} mipmapBlur />
+          <ToneMapping mode={TONE_PP[tone.curve]} />
+          <SMAA />
           <ChromaticAberration offset={caOffset} radialModulation modulationOffset={0.35} blendFunction={BlendFunction.NORMAL} />
           <Vignette darkness={0.5} offset={0.3} blendFunction={BlendFunction.NORMAL} />
         </EffectComposer>
@@ -3967,6 +4102,8 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         <EffectComposer multisampling={0} enableNormalPass>
           <N8AO aoRadius={1.4} intensity={2.6} distanceFalloff={1} quality="medium" color="#0a0a0e" />
           <Bloom intensity={0.18} luminanceThreshold={0.9} luminanceSmoothing={0.2} mipmapBlur />
+          <ToneMapping mode={TONE_PP[tone.curve]} />
+          <SMAA />
           <ChromaticAberration offset={caOffset} radialModulation modulationOffset={0.35} blendFunction={BlendFunction.NORMAL} />
           <Noise premultiply blendFunction={BlendFunction.SCREEN} opacity={0.3} />
           <Vignette darkness={0.5} offset={0.3} blendFunction={BlendFunction.NORMAL} />
@@ -4851,7 +4988,9 @@ export function ContractZeroScene({ contract, onOpStart, onOpCleared, onOpFailed
           must NOT tone-map again, or the image washes out. */}
       <Canvas
         shadows
-        gl={{ antialias: false, powerPreference: 'high-performance' }}
+        // Hardware multisampling only where there is no composer to do the work (the
+        // composer's own anti-aliasing is SMAA); under a composer it would be paid for and discarded.
+        gl={{ antialias: plan.post === 'off', powerPreference: 'high-performance' }}
         // C3: cap the render resolution. A retina phone is DPR 3 (9× the pixels of
         // DPR 1) — the single biggest mobile cost. Retina desktops render at DPR 2
         // (4× DPR 1) — the single biggest desktop cost. AdaptiveDpr trims toward the
