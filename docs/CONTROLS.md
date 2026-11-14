@@ -72,6 +72,7 @@ These are the default keys. Every keyboard action can be rebound in **Settings â
 |---|---|---|
 | Operations board | M | Training campaign only |
 | Performance readout | P |  |
+| Full screen | V |  |
 
 ## Touch
 

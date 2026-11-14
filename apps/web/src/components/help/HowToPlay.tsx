@@ -56,12 +56,12 @@ export function HowToPlay({ onClose, initial }: { onClose: () => void; initial?:
   return createPortal(
     <div className="fixed inset-0 z-[200] grid place-items-center bg-ink/80 p-3 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div ref={box} role="dialog" aria-modal="true" aria-labelledby="htp-title" className="cz-panel flex max-h-[92vh] w-full max-w-3xl flex-col text-fog" data-testid="how-to-play-dialog">
-        <div className="flex items-center gap-3 border-b border-line px-4 py-3">
+        <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3">
           <h2 id="htp-title" className="font-display text-lg font-bold uppercase tracking-[0.16em]">Field manual</h2>
           <a href={PLAYER_GUIDE_URL} target="_blank" rel="noreferrer noopener" className="text-xs text-steel underline">Full guide ↗</a>
           <button onClick={onClose} className="ml-auto cz-label hover:text-fog" aria-label="Close how to play">Close · Esc</button>
         </div>
-        <div role="tablist" aria-label="How to play sections" className="flex gap-1 overflow-x-auto border-b border-line px-2">
+        <div role="tablist" aria-label="How to play sections" className="flex shrink-0 gap-1 overflow-x-auto border-b border-line px-2">
           {TABS.map((t) => (
             <button key={t.id} role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)} data-testid={`htp-${t.id}`}
               className={`shrink-0 border-b-2 px-3 py-2 font-display text-xs font-bold uppercase tracking-[0.14em] ${tab === t.id ? 'border-amber text-amber-hi' : 'border-transparent text-muted hover:text-fog'}`}>{t.label}</button>
@@ -115,12 +115,14 @@ function ControlsTable({ groups, touchNote }: { groups: { group: string; rows: {
       {groups.map((g) => (
         <section key={g.group}>
           <H>{g.group}</H>
-          <table className="w-full text-left">
+          {/* Fixed columns, so the keys line up in one column across every section. */}
+          <table className="w-full table-fixed text-left">
+            <colgroup><col className="w-[48%] sm:w-[34%]" /><col className="w-[52%] sm:w-[24%]" /><col className="hidden sm:table-column" /></colgroup>
             <tbody>
               {g.rows.map((r) => (
                 <tr key={r.action} className="border-b border-line/60 align-top">
                   <th scope="row" className="py-1.5 pr-3 font-normal text-fog">{r.action}</th>
-                  <td className="py-1.5 pr-3 font-mono text-xs text-amber-hi">{r.keys}</td>
+                  <td className="break-words py-1.5 pr-3 font-mono text-xs text-amber-hi">{r.keys}</td>
                   <td className="hidden py-1.5 text-xs text-dim sm:table-cell">{r.note ?? ''}</td>
                 </tr>
               ))}

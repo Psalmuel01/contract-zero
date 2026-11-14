@@ -18,6 +18,7 @@ import {
   type AudioMix, type Graphics, type Palette, type Quality, type Settings, type SubtitleSize,
 } from '@/lib/settings'
 import { bindLabel } from '@/lib/keybinds'
+import { fullscreenSupported, toggleFullscreen } from '@/lib/fullscreen'
 import { useSyncState } from '@/lib/preferencesSync'
 import { resetTips } from '@/lib/tutorial'
 import { useAdvanced } from '@/lib/advanced'
@@ -245,11 +246,12 @@ function Display({ s }: { s: Settings }) {
 }
 
 function Fullscreen() {
+  const key = bindLabel(useSettings().controls.binds, 'fullscreen')
   const [on, setOn] = useState(false)
   const [supported, setSupported] = useState<boolean | null>(null)
   const [err, setErr] = useState<string | null>(null)
   useEffect(() => {
-    setSupported(!!document.fullscreenEnabled && typeof document.documentElement.requestFullscreen === 'function')
+    setSupported(fullscreenSupported())
     const f = () => setOn(!!document.fullscreenElement)
     f()
     document.addEventListener('fullscreenchange', f)
@@ -258,15 +260,14 @@ function Fullscreen() {
   const toggle = async () => {
     setErr(null)
     try {
-      if (document.fullscreenElement) await document.exitFullscreen()
-      else await document.documentElement.requestFullscreen({ navigationUI: 'hide' })
+      await toggleFullscreen()
     } catch (e) {
       setErr(`The browser refused full screen${(e as Error).message ? `: ${(e as Error).message}` : ''}. Try your browser’s own full-screen key.`)
     }
   }
   return (
     <>
-      <Row label="Full screen" hint="Stays on as you move between screens; Esc leaves it.">
+      <Row label="Full screen" hint={`Stays on as you move between screens. ${key === '—' ? '' : `${key} toggles it anywhere in the game (change it under Key bindings); `}Esc leaves it.`}>
         <Button onClick={toggle} disabled={supported === false} testid="fullscreen">{on ? 'Leave full screen' : 'Enter full screen'}</Button>
         <span className="text-xs text-dim" data-testid="fullscreen-state">{supported === false ? 'Not available in this browser' : on ? 'On' : 'Off'}</span>
       </Row>

@@ -9,7 +9,7 @@ export type Action =
   | 'lookUp' | 'lookDown' | 'lookLeft' | 'lookRight'
   | 'fire' | 'aim' | 'reload' | 'fireMode' | 'primary' | 'secondary' | 'swap'
   | 'interact' | 'inspect' | 'heal' | 'crouch' | 'leanLeft' | 'leanRight'
-  | 'nvg' | 'light' | 'laser' | 'optic' | 'target' | 'opsMenu' | 'perf'
+  | 'nvg' | 'light' | 'laser' | 'optic' | 'target' | 'opsMenu' | 'perf' | 'fullscreen'
 
 /** Two slots per action: a primary key and an optional second one. */
 export type Binds = Record<Action, [string | null, string | null]>
@@ -45,6 +45,7 @@ export const ACTIONS: ActionInfo[] = [
   { id: 'optic', label: 'Optic', group: 'Equipment' },
   { id: 'opsMenu', label: 'Operations board', group: 'Interface' },
   { id: 'perf', label: 'Performance readout', group: 'Interface' },
+  { id: 'fullscreen', label: 'Full screen', group: 'Interface' },
 ]
 
 export const DEFAULT_BINDS: Binds = {
@@ -55,7 +56,7 @@ export const DEFAULT_BINDS: Binds = {
   interact: ['KeyE', null], inspect: ['KeyI', null], heal: ['KeyH', null],
   crouch: ['KeyC', null], leanLeft: ['KeyQ', null], leanRight: ['KeyG', null],
   nvg: ['KeyN', null], light: ['KeyF', null], laser: ['KeyL', null], optic: ['KeyO', null],
-  opsMenu: ['KeyM', null], perf: ['KeyP', null],
+  opsMenu: ['KeyM', null], perf: ['KeyP', null], fullscreen: ['KeyV', null],
 }
 
 /** Keys a player can't bind, and why. */

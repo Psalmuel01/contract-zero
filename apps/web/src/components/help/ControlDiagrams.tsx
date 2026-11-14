@@ -22,7 +22,7 @@ const SHORT: Partial<Record<Action, string>> = {
   moveForward: 'fwd', moveBack: 'back', moveLeft: 'left', moveRight: 'right', lookUp: 'look', lookDown: 'look', lookLeft: 'look', lookRight: 'look',
   fire: 'fire', aim: 'aim', reload: 'reload', fireMode: 'mode', primary: 'gun 1', secondary: 'gun 2', swap: 'swap', target: 'lock',
   interact: 'use', inspect: 'inspect', heal: 'heal', crouch: 'crouch', leanLeft: 'lean', leanRight: 'lean',
-  nvg: 'NVG', light: 'light', laser: 'laser', optic: 'optic', opsMenu: 'ops', perf: 'fps',
+  nvg: 'NVG', light: 'light', laser: 'laser', optic: 'optic', opsMenu: 'ops', perf: 'fps', fullscreen: 'full',
 }
 
 export function KeyboardDiagram({ binds }: { binds: Binds }) {
