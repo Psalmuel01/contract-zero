@@ -11,6 +11,11 @@ function apiBase(): string {
   if (typeof window === 'undefined') return configured;
   try {
     const u = new URL(configured);
+    // A remote HTTPS API on another site: use this site's /api (next.config rewrites it),
+    // so the session cookie is first-party and Brave and Safari keep it.
+    if (u.protocol === 'https:' && u.host !== window.location.host && process.env.NEXT_PUBLIC_API_PROXY !== 'off') {
+      return `${window.location.origin}/api`;
+    }
     const loopback = (h: string) => h === 'localhost' || h === '127.0.0.1';
     if (loopback(u.hostname) && loopback(window.location.hostname)) u.hostname = window.location.hostname;
     return u.toString().replace(/\/$/, '');
