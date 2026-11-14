@@ -262,7 +262,10 @@ async fn persist(db: &mut PgConnection, w: &mut World) -> Result<(), sqlx::Error
         .bind(len as i64)
         .execute(&mut *db)
         .await?;
-    sqlx::query("DELETE FROM world_snapshots WHERE id <= (SELECT max(id) FROM world_snapshots) - $1")
+    // Prune only current-format snapshots (small). Old-format ones (each carrying the whole
+    // ledger, ~1 MB stored) are left as a static archive: deleting them one per tick cost
+    // ~2.8 MB of WAL each, as much as the old design. They cost disk space, not I/O.
+    sqlx::query("DELETE FROM world_snapshots WHERE ledger_len IS NOT NULL AND id <= (SELECT max(id) FROM world_snapshots) - $1")
         .bind(KEEP_SNAPSHOTS)
         .execute(&mut *db)
         .await?;
