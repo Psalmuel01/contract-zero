@@ -107,8 +107,15 @@ export class Dialogue {
 
   /** Start fetching a line's voice now (no audio context needed: decoding waits for play). */
   prefetch(src: string): void {
-    void this.load(src).catch(() => {})
+    void this.load(src).then(() => this.ready.add(src), () => {})
   }
+
+  /** Has this voice finished downloading? (Lines that can wait, like the strategic radio,
+   *  hold until it has, so voice and caption start together.) */
+  isReady(src: string): boolean {
+    return this.ready.has(src) || this.buffers.has(src)
+  }
+  private ready = new Set<string>()
 
   /** Real length of a voice that played, so the caption can be held for all of it. */
   duration(id: string): number | undefined {

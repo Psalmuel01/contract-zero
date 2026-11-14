@@ -21,6 +21,9 @@ const toEvent = (l: ServerRadioLine): RadioEvent | null => (KNOWN.has(l.speaker)
 import { useSettings } from '@/lib/settings'
 
 const SIZE = { s: 'text-[13px]', m: 'text-base', l: 'text-xl' } as const
+/** How long a strategic line may wait for its voice before it is said as its subtitle. */
+const VOICE_WAIT_MS = 25_000
+const queuedAt = new Map<string, number>()
 
 export function RadioFeed() {
   const settings = useSettings()
@@ -41,8 +44,18 @@ export function RadioFeed() {
       const audio = peekAudio()
       // Wait for a gesture: before one the browser would refuse the sound, and a line should not pass unheard.
       if (!audio?.isUnlocked()) return
+      // Strategic news can wait a few seconds; a voice that starts after its caption
+      // can't. Hold the line until its voice has arrived (the server takes ~10 s to make a
+      // new one), up to VOICE_WAIT_MS, then play it either way: voice, or subtitle and tone.
+      const head = strategicQueue.peek()
+      if (head?.audio && !audio.voReady?.(head.audio)) {
+        const since = (queuedAt.get(head.key) ?? (queuedAt.set(head.key, Date.now()), Date.now()))
+        audio.prefetchVo?.(head.audio)
+        if (Date.now() - since < VOICE_WAIT_MS) return
+      }
       const e = strategicQueue.next(Date.now())
       if (!e) return
+      queuedAt.delete(e.key)
       audio.vo(`radio-${e.key}`, e.speaker, undefined, e.audio)
       setLine(e)
       if (hide) clearTimeout(hide)

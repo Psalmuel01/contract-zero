@@ -9,8 +9,9 @@ const decisions: { current: ServerRadioLine[] } = { current: [] }
 vi.mock('@/lib/api', async (orig) => ({ ...(await orig<typeof import('@/lib/api')>()), api: { radio: () => Promise.resolve(decisions.current) } }))
 const vo = vi.fn()
 const prefetchVo = vi.fn()
+const ready = { current: true }
 const unlocked = { current: true }
-vi.mock('@/engine/audio/shared', () => ({ peekAudio: () => ({ isUnlocked: () => unlocked.current, vo, prefetchVo }) }))
+vi.mock('@/engine/audio/shared', () => ({ peekAudio: () => ({ isUnlocked: () => unlocked.current, vo, prefetchVo, voReady: () => ready.current }) }))
 // a fresh, fast queue per test (the real one is a singleton with a 20 s gap)
 const q: { current: RadioQueue } = { current: new RadioQueue({ gapMs: 0 }) }
 vi.mock('@/engine/story/strategicRadio', async (orig) => { const m = await orig<typeof import('@/engine/story/strategicRadio')>(); return { ...m, get strategicQueue() { return q.current } } })
@@ -19,7 +20,7 @@ import { RadioFeed } from '../RadioFeed'
 const dec = (seq: number, have: number): ServerRadioLine => ({ key: `decision-${seq}`, speaker: 'vanguard', text: `Medicine at ${have} of 24. Logged. Resupply is ordered.`, tick: seq, evidence: 'vanguard: med below target', audio: `/radio/decision-${seq}/vo` })
 const mount = (client: QueryClient) => render(<QueryClientProvider client={client}><RadioFeed /></QueryClientProvider>)
 
-beforeEach(() => { vo.mockClear(); prefetchVo.mockClear(); unlocked.current = true; decisions.current = [dec(1, 20)]; q.current = new RadioQueue({ gapMs: 0 }) })
+beforeEach(() => { vo.mockClear(); prefetchVo.mockClear(); ready.current = true; unlocked.current = true; decisions.current = [dec(1, 20)]; q.current = new RadioQueue({ gapMs: 0 }) })
 afterEach(() => { localStorage.clear() })
 
 describe('RadioFeed', () => {
@@ -66,5 +67,19 @@ describe('RadioFeed', () => {
     expect(screen.queryByTestId('radio-line')).toBeNull()
     expect(screen.getByTestId('radio-feed').textContent).toContain('Medicine at 12 of 24')
     expect(screen.getByTestId('radio-feed').getAttribute('aria-live')).toBe('polite')
+  })
+  it("waits for a new line's voice to arrive, so the voice and the caption start together", async () => {
+    ready.current = false
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    mount(client)
+    await waitFor(() => expect(client.getQueryData(['radio-lines'])).toBeTruthy())
+    decisions.current = [dec(1, 20), dec(5, 9)]
+    await client.refetchQueries({ queryKey: ['radio-lines'] })
+    await new Promise((r) => setTimeout(r, 2500))
+    expect(vo).not.toHaveBeenCalled()                 // voice still being made: hold the line
+    expect(screen.queryByTestId('radio-line')).toBeNull()
+    ready.current = true                              // it arrives
+    await waitFor(() => expect(vo).toHaveBeenCalledTimes(1), { timeout: 3000 })
+    expect(screen.getByTestId('radio-line').textContent).toContain('Medicine at 9 of 24')
   })
 })

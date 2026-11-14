@@ -874,6 +874,11 @@ export class FpsAudio {
     this.dialogue.prefetch(src);
   }
 
+  /** Has a prefetched voice arrived? */
+  voReady(src: string): boolean {
+    return this.dialogue.isReady(src);
+  }
+
   /**
    * Each site's own air above the rumble (measured: the three soundscapes were within
    * 1-3 dB of each other in every band, nearly all below 800 Hz). Dustline: wind that

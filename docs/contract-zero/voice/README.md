@@ -88,8 +88,15 @@ needs a local API with a voice service (`TTS_URL`) and a world that has made dec
   line added without one) is subtitle-only. Adding a line means voicing it
   (`pregen.py`) or serving it from the API. The development log names any line that has
   no voice.
-- **Synthesis time:** about 3 s a line on a CPU. Warm-up covers expected lines. An
-  unexpected one that isn't ready in 1.5 s is shown, not spoken, and is cached for next
-  time.
+- **Synthesis time:** about 3 s a line on this Mac, but **about 11–12 s on Railway's CPU**
+  (measured on production).
+  - **Strategic radio:** a line waits for its voice, up to 25 s, before being said, so it
+    plays voiced. If it's still not ready, it plays as subtitle and tone.
+  - **Mission lines:** voiced from the moment the story is served, in play order. With
+    about 17 lines a mission, the first few beats are ready within about a minute of
+    preparation; a line not ready at its beat is shown, not spoken, and cached for next
+    time.
+  - **Faster synthesis** needs a bigger CPU for the `voice` service on Railway (or a GPU
+    host).
 - **One mispronunciation:** Kokoro says "Medicine" in a way Whisper sometimes hears as
   "Medecine". Listen for it.

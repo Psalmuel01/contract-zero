@@ -113,6 +113,9 @@ export class RadioQueue {
     while (this.queue.length > this.max) this.queue.shift()   // a busy world drops its oldest unspoken line, not the newest
   }
 
+  /** The line that would be said next, without taking it. */
+  peek(): RadioEvent | null { return this.queue[0] ?? null }
+
   /** The next line, if one is waiting and enough time has passed since the last. */
   next(nowMs: number): RadioEvent | null {
     if (!this.queue.length || nowMs - this.lastAt < this.gapMs) return null
