@@ -1,5 +1,5 @@
 //! Radio voices for lines the server wrote: a mission's story (authored, or rewritten
-//! by the model and checked). Synthesis runs in the
+//! by the model and checked), and the strategic radio (services/radio.rs). Synthesis runs in the
 //! private voice service (apps/tts, TTS_URL + TTS_TOKEN); the browser never sees it or
 //! its token, and can only ask for a line by its id in a record the server stored, never
 //! for arbitrary text. Every distinct line is synthesized once (voice_cache).
@@ -23,6 +23,13 @@ pub struct VoiceService {
     url: String,
     token: String,
     http: reqwest::Client,
+    /// One synthesis per line at a time: a warm-up and a player asking for the same line
+    /// share it instead of generating it twice.
+    inflight: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+async fn cached(db: &PgPool, key: &str) -> Option<Vec<u8>> {
+    sqlx::query_as::<_, (Vec<u8>,)>("SELECT audio FROM voice_cache WHERE key = $1").bind(key).fetch_optional(db).await.ok().flatten().map(|r| r.0)
 }
 
 pub fn cache_key(speaker: &str, text: &str) -> String {
@@ -35,7 +42,7 @@ impl VoiceService {
         let url = std::env::var("TTS_URL").ok().map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty())?;
         let token = std::env::var("TTS_TOKEN").ok().filter(|t| !t.trim().is_empty())?;
         // A line takes a few seconds on a CPU; past this the client already moved on.
-        Some(Self { url, token, http: super::bounded_http(5, 45) })
+        Some(Self { url, token, http: super::bounded_http(5, 45), inflight: Default::default() })
     }
 
     async fn synthesize(&self, speaker: &str, text: &str) -> Result<Vec<u8>, String> {
@@ -52,13 +59,27 @@ impl VoiceService {
             return Err("not a voiceable line".into());
         }
         let key = cache_key(speaker, text);
-        if let Ok(Some((audio,))) = sqlx::query_as::<_, (Vec<u8>,)>("SELECT audio FROM voice_cache WHERE key = $1").bind(&key).fetch_optional(db).await {
+        if let Some(audio) = cached(db, &key).await {
             return Ok(audio);
         }
-        let audio = self.synthesize(speaker, text).await?;
-        let _ = sqlx::query("INSERT INTO voice_cache (key, speaker, text, audio) VALUES ($1, $2, $3, $4) ON CONFLICT (key) DO NOTHING")
-            .bind(&key).bind(speaker).bind(text).bind(&audio).execute(db).await;
-        Ok(audio)
+        let gate = self.inflight.lock().unwrap().entry(key.clone()).or_default().clone();
+        let _turn = gate.lock().await;
+        // Whoever held the gate may have just made it.
+        if let Some(audio) = cached(db, &key).await {
+            return Ok(audio);
+        }
+        let made = self.synthesize(speaker, text).await;
+        if let Ok(audio) = &made {
+            let _ = sqlx::query("INSERT INTO voice_cache (key, speaker, text, audio) VALUES ($1, $2, $3, $4) ON CONFLICT (key) DO NOTHING")
+                .bind(&key).bind(speaker).bind(text).bind(audio).execute(db).await;
+        }
+        self.inflight.lock().unwrap().remove(&key);
+        made
+    }
+
+    /// Is this line already voiced? (cheap: no synthesis)
+    pub async fn is_cached(&self, db: &PgPool, speaker: &str, text: &str) -> bool {
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM voice_cache WHERE key = $1)").bind(cache_key(speaker, text)).fetch_one(db).await.unwrap_or(false)
     }
 
     /// Voice a mission's lines in the background, in the order a run meets them, so
@@ -74,6 +95,31 @@ impl VoiceService {
             }
         });
     }
+}
+
+/// Voice the strategic radio as it happens: every few seconds, any new line the radio
+/// would say (an accepted decision, a filled order) is synthesized and cached before a
+/// browser asks for it. Its own task: it never holds the world lock while it waits on
+/// synthesis, so ticks, combat and mission completion never wait for a voice.
+pub fn spawn_radio_warmup(state: crate::AppState) {
+    let Some(voice) = state.voice.clone() else { return };
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let db = state.world.db().clone();
+            let mut lines = super::radio::decision_lines(&db).await;
+            lines.extend(state.world.read(super::radio::order_lines).await);
+            for l in super::radio::latest(lines, 8) {
+                if !voice.is_cached(&db, &l.speaker, &l.text).await {
+                    if let Err(e) = voice.audio(&db, &l.speaker, &l.text).await {
+                        tracing::debug!("radio warm-up: {}: {e}", l.key);
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// The order a mission's radio beats tend to fire in (presence.ts triggers).

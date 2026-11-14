@@ -4,7 +4,7 @@ import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { Rajdhani } from 'next/font/google'
 import { useSearchParams } from 'next/navigation'
-import { Suspense, useMemo, useState } from 'react'
+import { Suspense, useEffect, useMemo, useState } from 'react'
 import { Briefing } from '@/components/story/Briefing'
 import { GunStatBars } from '@/components/armory/GunStatBars'
 import { ScreenTip } from '@/components/help/ScreenTip'
@@ -20,6 +20,7 @@ import { OperationIntel } from '@/components/world/OperationIntel'
 import { ReadinessSummary, useReadinessData } from '@/components/world/Readiness'
 import { MissionResults } from '@/components/world/MissionResults'
 import { useMusicState } from '@/components/audio/AudioProvider'
+import { peekAudio } from '@/engine/audio/shared'
 import { WorldClockPanel } from '@/components/world/WorldClock'
 import { MissionStream } from '@/lib/missionStream'
 import { ItemInspector } from '@/components/inspect/ItemInspector'
@@ -120,6 +121,18 @@ function Deploy() {
       setPhase({ kind: 'error', message: (e as Error).message })
     }
   }
+
+  // Mission prep: start fetching every line's voice as soon as the story is known (the
+  // server began voicing them when it served the story), so the run's first lines play
+  // from cache instead of racing their deadline.
+  const storySession = phase.kind === 'briefing' && phase.story ? phase.start.session : null
+  useEffect(() => {
+    if (phase.kind !== 'briefing' || !phase.story || !storySession) return
+    const audio = peekAudio()
+    for (const lines of Object.values(phase.story.radio)) for (const l of lines ?? []) {
+      audio?.prefetchVo(`${API}/missions/${storySession}/vo/${encodeURIComponent(l.id)}`)
+    }
+  }, [storySession]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const mission = useMemo(() => {
     if (phase.kind !== 'fighting') return null

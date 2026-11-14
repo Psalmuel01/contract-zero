@@ -1,0 +1,11 @@
+[radio] handler-op-start: pregenerated
+[radio] handler-first-contact: pregenerated after waiting 1423 ms
+[radio] radio-decision-53: dynamic
+[radio] handler-low-ammo: pregenerated
+[radio] radio-decision-53: cache
+[radio] radio-decision-53: cache
+[radio] radio-decision-7: dynamic
+[radio] radio-order-2: dynamic
+[radio] radio-missing: subtitle-only (http 404)
+[radio] radio-hung: subtitle-only (not ready in time)
+[radio] dyn-no-voice: subtitle-only (no voice for this line)

@@ -261,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("voice: {}", if app_state.voice.is_some() { "radio lines are synthesized (TTS_URL)" } else { "no voice service; radio lines play as subtitles and squelch" });
 
     services::scheduler::spawn(app_state.clone());
+    services::voice::spawn_radio_warmup(app_state.clone());
     services::settlement::spawn_worker(app_state.clone());
     services::exchange::spawn_sweeper(app_state.clone());
     services::planner::spawn(app_state.clone());

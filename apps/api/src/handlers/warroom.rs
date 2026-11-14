@@ -465,3 +465,39 @@ pub async fn operations(state: web::Data<AppState>, q: web::Query<OperationsQuer
     }
     HttpResponse::Ok().json(json!({ "operations": out }))
 }
+
+#[derive(Deserialize)]
+pub struct RadioQuery {
+    pub limit: Option<usize>,
+}
+
+/// `GET /radio`: the strategic radio, built here from accepted decisions and filled
+/// orders. The text is the caption AND what the voice says; `audio` is its voice.
+pub async fn radio(state: web::Data<AppState>, q: web::Query<RadioQuery>) -> HttpResponse {
+    let db = state.world.db();
+    let mut lines = crate::services::radio::decision_lines(db).await;
+    lines.extend(state.world.read(crate::services::radio::order_lines).await);
+    let lines = crate::services::radio::latest(lines, q.limit.unwrap_or(12).min(40));
+    let voiced = state.voice.is_some();
+    HttpResponse::Ok().json(json!({
+        "lines": lines.into_iter().map(|l| {
+            let audio = voiced.then(|| format!("/radio/{}/vo", l.key));
+            json!({ "key": l.key, "speaker": l.speaker, "text": l.text, "tick": l.tick, "evidence": l.evidence, "audio": audio })
+        }).collect::<Vec<_>>(),
+    }))
+}
+
+/// `GET /radio/{key}/vo`: one strategic line, voiced. The line is rebuilt from its record
+/// (never taken from the request), so only what the server itself would say is spoken.
+pub async fn radio_voice(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+    let Some(voice) = state.voice.as_ref() else { return HttpResponse::NotFound().finish() };
+    let key = path.into_inner();
+    let db = state.world.db();
+    let line = match crate::services::radio::decision_by_key(db, &key).await {
+        Some(l) => Some(l),
+        None => { let k = key.clone(); state.world.read(move |w| crate::services::radio::order_by_key(w, &k)).await }
+    };
+    let Some(line) = line else { return HttpResponse::NotFound().finish() };
+    crate::handlers::missions::voice_response(voice.audio(db, &line.speaker, &line.text).await)
+}
+

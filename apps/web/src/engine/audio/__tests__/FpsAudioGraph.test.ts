@@ -52,17 +52,25 @@ describe('seven channels reach the right buses', () => {
 })
 
 describe('radio ducking', () => {
-  it('a radio line dips music, combat and handling but never silences them, and leaves radio and interface alone', () => {
-    audio.vo('dyn-test', 'handler')
+  it('a voiced line dips music, combat and handling but never silences them, and leaves radio and interface alone', async () => {
+    const ctx = inner(audio).ctx as FakeAudioContext
+    ;(ctx as unknown as { decodeAudioData: () => Promise<unknown> }).decodeAudioData = () => Promise.resolve({ duration: 2 })
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(new ArrayBuffer(8), { status: 200 })))
+    audio.vo('handler-first-contact', 'handler')
+    await vi.waitFor(() => expect(gain(inner(audio).combatDuck).min).toBeCloseTo(0.4))
     const a = inner(audio)
     expect(gain(a.musicDuck).min).toBeCloseTo(0.45)
-    expect(gain(a.combatDuck).min).toBeCloseTo(0.4)   // deeper since the voice band measured masked by gunfire
     expect(gain(a.interactDuck).min).toBeCloseTo(0.7)
     expect(gain(a.ambDuck).min).toBeCloseTo(0.5)  // the room is still there
     for (const d of ['musicDuck', 'combatDuck', 'interactDuck']) expect(gain(a[d]).min, d).toBeGreaterThan(0.3)
-    // each swells back to full
-    expect(gain(a.musicDuck).value).toBe(1)
+    expect(gain(a.musicDuck).value).toBe(1)        // each swells back to full
     expect(gain(a.voiceBus).history).not.toContain(0)
+  })
+
+  it('a line with no voice does not dip the mix: there is nothing to make room for', async () => {
+    audio.vo('dyn-no-voice', 'handler')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(gain(inner(audio).combatDuck).history.length).toBe(0)
   })
 })
 
@@ -310,7 +318,7 @@ describe('every radio voice has its own signature', () => {
       expect(a.voiceBus.inputs, who).toBeGreaterThan(inputs)
       built[who] = (ctx.nodesByKind.source ?? 0) - before
     }
-    expect(built.halcyon).toBe(4)                                    // two narrow bands to open, carrier hiss, squelch tail
+    expect(built.halcyon).toBe(2)                                    // its two narrow bands: a brief tone, no speech of any kind
     expect(new Set(Object.values(built)).size).toBeGreaterThan(1)    // not one signature for everyone
   })
 })
@@ -397,11 +405,12 @@ describe('the audio engine follows the economy\u2019s cues', () => {
 })
 
 describe('a radio line with no recording still sounds like a transmission', () => {
-  it('carries a voice-shaped murmur on the radio channel for the length of the line, then closes', () => {
+  it('never synthesizes speech: a line with no voice builds no oscillator and no distortion', async () => {
     const ctx = inner(audio).ctx as FakeAudioContext
     const osc = ctx.nodesByKind.osc ?? 0, shaper = ctx.nodesByKind.shaper ?? 0
-    audio.vo('dyn-murmur', 'vanguard', 3)
-    expect((ctx.nodesByKind.osc ?? 0) - osc).toBe(1)      // one voice, not a node per syllable
-    expect((ctx.nodesByKind.shaper ?? 0) - shaper).toBe(1) // the radio's grit
+    for (const who of ['handler', 'vanguard', 'ashen', 'vex', 'halcyon'] as const) audio.vo(`dyn-none-${who}`, who, 3)
+    await new Promise((r) => setTimeout(r, 0))
+    expect((ctx.nodesByKind.osc ?? 0) - osc).toBe(0)
+    expect((ctx.nodesByKind.shaper ?? 0) - shaper).toBe(0)
   })
 })

@@ -22,6 +22,8 @@ export interface RadioEvent {
   tick: number
   /** The record it was made from, for the advanced view. */
   evidence: string
+  /** The server's voice for exactly this text, when it has one. */
+  audio?: string
 }
 
 const NAME: Record<ResourceName, string> = { ammo: 'ammunition', med: 'medicine', fuel: 'fuel' }
@@ -119,6 +121,9 @@ export class RadioQueue {
   }
 
   pending(): number { return this.queue.length }
+
+  /** What is waiting, so its voices can be fetched before their turn. */
+  waiting(): readonly RadioEvent[] { return this.queue }
 }
 
 /** The app's one queue: it outlives any screen, so moving between the Hub and the War Room does not replay anything. */

@@ -351,7 +351,7 @@ function Audio({ s, set }: { s: Settings; set: SetFn }) {
     }
     a.setMusicOverride(null)
     if (k === 'effects' || k === 'master') a.explosion([0, 1, -6])
-    else if (k === 'voice') a.vo('dyn-settings-test', 'handler')
+    else if (k === 'voice') a.vo('handler-first-contact', 'handler') // a real, pre-voiced line
     else if (k === 'ambience') { a.setZone('CINDER_YARD'); setTimeout(() => a.setZone('NONE'), 4000) }
     else if (k === 'interactions') { a.reloadStart(); setTimeout(() => a.reloadDone(), 450) }
     else a.beep(true)

@@ -362,6 +362,8 @@ export interface MarketOrder {
 export interface MarketView { tick: number; tick_secs: number; settlement: 'near' | 'off_chain'; controller: string | null; merchants: MarketMerchant[]; orders: MarketOrder[] }
 export interface PreparedOrder { order_id: string; nonce: number; call: { receiver_id: string; method: string; args: Record<string, unknown>; gas: string } }
 
+export interface ServerRadioLine { key: string; speaker: string; text: string; tick: number; evidence: string; audio: string | null }
+
 export interface ProcurementChain {
   order: number; chain_id: string; requester: string; requester_name: string; side: 'buy' | 'sell'; resource: ResourceName
   qty: number; limit_total: number; urgency: number; placed_at: number; expires_at: number; status: { status: string }; purpose: string
@@ -409,6 +411,8 @@ export const api = {
   acceptOrderProposal: (order: number, proposal: number, tx_hash?: string) => req<{ ok: boolean }>(`/market/orders/${order}/accept`, { method: 'POST', body: JSON.stringify({ proposal, tx_hash }) }),
   cancelOrder: (order: number, tx_hash?: string) => req<{ ok: boolean }>(`/market/orders/${order}/cancel`, { method: 'POST', body: JSON.stringify({ tx_hash }) }),
   procurement: (limit = 12) => req<{ chains: ProcurementChain[] }>(`/warroom/procurement?limit=${limit}`).then((r) => r.chains),
+  /** The strategic radio as the server says it: one text for the caption and the voice. */
+  radio: (limit = 12) => req<{ lines: ServerRadioLine[] }>(`/radio?limit=${limit}`).then((r) => r.lines),
   intents: () => req<IntentsOverview>('/intents'),
   intentsQuote: (b: { origin_asset: string; destination_asset: string; amount: string }) => req<IntentsQuote>('/intents/quote', { method: 'POST', body: JSON.stringify(b) }),
   savePreferences: (version: number, prefs: Record<string, unknown>) => req<StoredPreferences>('/me/preferences', { method: 'PUT', body: JSON.stringify({ version, prefs }) }),

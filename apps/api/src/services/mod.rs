@@ -12,6 +12,7 @@ pub mod protocol;
 pub mod intents;
 pub mod keys;
 pub mod voice;
+pub mod radio;
 
 /// An HTTP client that can't wait forever. Every outbound call (NEAR RPC, NEAR Auth,
 /// alerts) used `reqwest::Client::new()`, which has no timeout: an endpoint that

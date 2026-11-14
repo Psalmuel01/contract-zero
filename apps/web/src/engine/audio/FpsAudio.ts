@@ -8,6 +8,7 @@ import { alarmPattern, closestApproach, distanceClass, nearMissStrength, propaga
 import { impulseResponse, INDOOR_IR, isIndoors, OUTDOOR_IR, spaceMix } from './acoustics';
 import type { LevelDef } from '../fps/levels';
 import { SoundscapeRunner } from './soundscapeRunner';
+import { Dialogue } from './dialogue';
 import { idleProps, isDelivering, type WorldCues } from '../fps/lineProps';
 import type { LevelId } from '../fps/levels';
 
@@ -40,15 +41,7 @@ type Ctx = AudioContext;
 // scripts/generate-sfx.mjs (see CREDITS.md), not recordings. The runtime synth read
 // like a punch, so the gun plays these buffers. One is picked at random per shot
 // with a little pitch wobble so rapid fire isn't a copy-paste.
-import voManifest from '../../../public/vo/manifest.json';
 
-/** Authored lines voiced in advance (apps/tts/pregen.py), by id. */
-const PREVOICED = new Set(Object.keys(voManifest));
-/** A voice not ready by now plays as its subtitle: later, it would trail the caption. */
-const VO_DEADLINE_MS = 3500;
-/** Per-speaker voice level into the voice bus (before the mix's own voice slider). */
-// Measured over a firefight: at 1.0 a line lifted the voice band only 1.5 dB.
-const VO_LEVEL: Record<Speaker, number> = { handler: 1.6, halcyon: 1.5, vanguard: 1.6, vex: 1.5, ashen: 1.45 };
 
 /** Linear to 0.8 (about -2 dBFS), then a smooth knee that approaches 0.93 (-0.6 dBFS). */
 function softCeiling(n = 4096): Float32Array<ArrayBuffer> {
@@ -863,131 +856,22 @@ export class FpsAudio {
   }
 
   /**
-   * A presence line. The per-speaker radio signature and the duck first (a voice owns
-   * the channel), then the voice itself:
-   *  - an authored line is pre-voiced in public/vo (apps/tts/pregen.py);
-   *  - a mission's own line carries `url`, the API's voice for it (synthesized once,
-   *    cached, only for lines the server stored);
-   *  - otherwise, or if the voice isn't ready within VO_DEADLINE_MS (a late voice would
-   *    land out of step with its subtitle), the line plays as its subtitle over the
-   *    channel's own sound.
-   * Voices are decoded into the graph, through a radio band and the voice bus, so they
-   * follow the mix, the ducking and the recording tap like everything else.
+   * A character's line: their real voice (pre-voiced, or the server's voice for a line
+   * it wrote) or, if none can be had in time, their brief radio tone and the subtitle.
+   * Never synthetic speech. See engine/audio/dialogue.ts.
    */
-  vo(id: string, speaker: Speaker, seconds = 2.6, url?: string): void {
-    const dur = Math.max(1.2, Math.min(7, seconds));
-    if (this.ctx) {
-      this.radioSignature(speaker);
-      this.radioDuck(dur + 0.3);
-    }
-    const src = url ?? (PREVOICED.has(id) ? `/vo/${id}.mp3` : null);
-    const ctx = this.ctx;
-    if (!src || !ctx) { this.radioMurmur(speaker, dur); return; }
-    const ready = this.voBuffers.get(src);
-    if (ready) { this.playVoBuffer(id, ready, speaker); return; }
-    let settled = false;
-    const fallback = () => { if (!settled) { settled = true; this.radioMurmur(speaker, dur); } };
-    const timer = setTimeout(fallback, VO_DEADLINE_MS);
-    fetch(src, { credentials: url ? 'include' : 'same-origin' })
-      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`voice ${r.status}`))))
-      .then((b) => ctx.decodeAudioData(b))
-      .then((buf) => {
-        this.voBuffers.set(src, buf);
-        if (!settled) { settled = true; clearTimeout(timer); this.playVoBuffer(id, buf, speaker); }
-      })
-      .catch(() => { clearTimeout(timer); fallback(); });
+  vo(id: string, speaker: Speaker, _seconds?: number, url?: string): void {
+    void this.dialogue.say(id, speaker, url);
   }
 
-  /** Warm a line's voice ahead of its beat (the deploy screen does this for a mission). */
-  prefetchVo(url: string): void {
-    const ctx = this.ctx;
-    if (!ctx || this.voBuffers.has(url)) return;
-    fetch(url, { credentials: 'include' })
-      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`voice ${r.status}`))))
-      .then((b) => ctx.decodeAudioData(b))
-      .then((buf) => { this.voBuffers.set(url, buf); })
-      .catch(() => {});
+  /** A voice rendered clean or through the radio chain, offline (comparisons, probes). */
+  renderVoice(src: string, speaker: Speaker, processed: boolean): Promise<{ rate: number; samples: Float32Array }> {
+    return this.dialogue.render(src, speaker, processed);
   }
 
-  /** A decoded voice through a radio band (Ashen's set overdriven) into the voice bus. */
-  private playVoBuffer(id: string, buf: AudioBuffer, speaker: Speaker): void {
-    const ctx = this.ctx;
-    if (!ctx) return;
-    this.voDurations.set(id, buf.duration);
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 260; hp.Q.value = 0.7;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = speaker === 'halcyon' ? 4200 : 3600; lp.Q.value = 0.7;
-    // Presence: speech intelligibility lives at 1.5-4 kHz.
-    const pres = ctx.createBiquadFilter(); pres.type = 'peaking'; pres.frequency.value = 2400; pres.Q.value = 0.9; pres.gain.value = 4;
-    const g = ctx.createGain(); g.gain.value = VO_LEVEL[speaker];
-    let chain: AudioNode = src;
-    chain = chain.connect(hp).connect(pres).connect(lp);
-    if (speaker === 'ashen') {
-      const drive = ctx.createWaveShaper(); drive.curve = driveCurve(2.2); drive.oversample = '2x';
-      chain = chain.connect(drive);
-    }
-    chain.connect(g).connect(this.voiceBus ?? this.uiBus);
-    src.start();
-  }
-
-  /**
-   * A transmission with no recording behind it: carrier hiss, a speech-shaped murmur
-   * (a pitched buzz through two formant filters that jump per syllable, gated in
-   * syllables and phrases) and a squelch tail. Per speaker: Vanguard low and clipped,
-   * the Ashen Compact harsh and overdriven, Halcyon clean and narrow, Vex quick and
-   * loose, the handler close and warm. Band-limited to a radio's 300 Hz to 3.4 kHz.
-   */
-  private radioMurmur(speaker: Speaker, seconds: number): void {
-    const ctx = this.ctx;
-    const bus = this.voiceBus ?? this.uiBus;
-    if (!ctx || !bus) return;
-    const v = MURMUR[speaker] ?? MURMUR.handler;
-    const t0 = ctx.currentTime + 0.08, t1 = t0 + seconds;
-    // carrier hiss under the whole transmission
-    const hiss = ctx.createBufferSource();
-    hiss.buffer = this.flatNoise(seconds + 0.2);
-    const hb = ctx.createBiquadFilter(); hb.type = 'bandpass'; hb.frequency.value = 1800; hb.Q.value = 0.6;
-    const hg = ctx.createGain();
-    hg.gain.setValueAtTime(0.0001, t0); hg.gain.linearRampToValueAtTime(v.hiss, t0 + 0.04)
-    hg.gain.setValueAtTime(v.hiss, t1); hg.gain.linearRampToValueAtTime(0.0001, t1 + 0.06);
-    hiss.connect(hb).connect(hg).connect(bus);
-    hiss.start(t0); hiss.stop(t1 + 0.1);
-    // the voice: a buzz at the speaker's pitch, with a little drift
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(v.f0, t0);
-    const f1 = ctx.createBiquadFilter(); f1.type = 'bandpass'; f1.Q.value = 2.5;
-    const f2 = ctx.createBiquadFilter(); f2.type = 'bandpass'; f2.Q.value = 3.5;
-    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 300;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = v.top;
-    const shaper = ctx.createWaveShaper(); shaper.curve = driveCurve(v.drive);
-    const env = ctx.createGain(); env.gain.value = 0;
-    // measured: at the first level the murmur lost the voice band to the fight it sat in
-    const out = ctx.createGain(); out.gain.value = v.level * 1.3;
-    // two formant paths summed, then the radio's band and grit
-    const sum = ctx.createGain();
-    osc.connect(f1).connect(sum); osc.connect(f2).connect(sum);
-    sum.connect(env).connect(shaper).connect(hp).connect(lp).connect(out).connect(bus);
-    // syllables: random vowel formants, gated with short gaps; phrases break every ~1 s
-    const VOWELS: [number, number][] = [[730, 1090], [530, 1840], [270, 2290], [570, 840], [300, 870], [440, 1020], [660, 1720]];
-    let t = t0, inPhrase = 0;
-    while (t < t1 - 0.12) {
-      const len = v.syl * (0.7 + Math.random() * 0.6);
-      const [a, b] = VOWELS[Math.floor(Math.random() * VOWELS.length)];
-      f1.frequency.setValueAtTime(a * v.formant, t); f2.frequency.setValueAtTime(b * v.formant, t);
-      osc.frequency.setValueAtTime(v.f0 * (0.9 + Math.random() * 0.25), t);
-      const peak = 0.55 + Math.random() * 0.45;
-      env.gain.setValueAtTime(0, t);
-      env.gain.linearRampToValueAtTime(peak, t + 0.025);
-      env.gain.setValueAtTime(peak * 0.8, t + len * 0.7);
-      env.gain.linearRampToValueAtTime(0, t + len);
-      inPhrase += len;
-      t += len + (inPhrase > 0.9 + Math.random() * 0.6 ? (inPhrase = 0, 0.18 + Math.random() * 0.2) : 0.02 + Math.random() * 0.05);
-    }
-    osc.start(t0); osc.stop(t1 + 0.05);
-    // squelch tail as the key is released
-    this.noiseBand(v.tail, 0.12, 0.11, t1 + 0.02 - ctx.currentTime);
+  /** Start fetching a line's voice ahead of its beat (mission prep, strategic radio). */
+  prefetchVo(src: string): void {
+    this.dialogue.prefetch(src);
   }
 
   /**
@@ -1046,12 +930,16 @@ export class FpsAudio {
     return buf;
   }
 
-  private voBuffers = new Map<string, AudioBuffer>();
-  private voDurations = new Map<string, number>();
+  private dialogue = new Dialogue({
+    ctx: () => this.ctx,
+    output: () => this.voiceBus ?? this.uiBus ?? null,
+    tone: (speaker) => this.radioSignature(speaker),
+    duck: (seconds) => this.radioDuck(seconds),
+  });
 
   /** Real length of a recorded line, once its metadata has loaded. */
   voDuration(id: string): number | undefined {
-    return this.voDurations.get(id);
+    return this.dialogue.duration(id);
   }
 
   /** Per-speaker static: you know WHO is talking before you read a word. */
@@ -1582,22 +1470,6 @@ export class FpsAudio {
     for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
     return buf;
   }
-}
-
-/** How each speaker's murmur sounds: pitch, syllable length, formant shift, grit, level. */
-const MURMUR: Record<Speaker, { f0: number; syl: number; formant: number; drive: number; top: number; hiss: number; level: number; tail: number }> = {
-  handler: { f0: 185, syl: 0.17, formant: 1.05, drive: 1.5, top: 3400, hiss: 0.012, level: 0.42, tail: 1900 },
-  vanguard: { f0: 104, syl: 0.15, formant: 0.92, drive: 2, top: 3000, hiss: 0.014, level: 0.46, tail: 520 },
-  ashen: { f0: 118, syl: 0.19, formant: 0.95, drive: 6, top: 3200, hiss: 0.022, level: 0.4, tail: 760 },
-  halcyon: { f0: 175, syl: 0.16, formant: 1.08, drive: 1.1, top: 3400, hiss: 0.006, level: 0.38, tail: 2800 },
-  vex: { f0: 142, syl: 0.13, formant: 1.0, drive: 3, top: 3300, hiss: 0.016, level: 0.42, tail: 1150 },
-};
-
-/** A soft-clip curve: 1 is clean, higher is grittier. */
-function driveCurve(k: number): Float32Array<ArrayBuffer> {
-  const n = 1024, c = new Float32Array(new ArrayBuffer(n * 4));
-  for (let i = 0; i < n; i++) { const x = (i / (n - 1)) * 2 - 1; c[i] = Math.tanh(k * x) / Math.tanh(k); }
-  return c;
 }
 
 /**
