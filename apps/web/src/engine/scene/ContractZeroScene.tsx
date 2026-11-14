@@ -3861,9 +3861,9 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       <directionalLight
         ref={sunRef}
         position={LEVEL ? [levelCx + 22, 34, levelCz + 26] : [9, 16, 10]} intensity={theme.sun.intensity} color={theme.sun.color} castShadow={plan.shadows}
-        // The map spans up to 100 m of site. 3072 on the full tier is a 3 cm texel
-        // (crisp contact under a barrier); 2048 on medium, 1024 on the light tiers.
-        shadow-mapSize={[lightFx ? 1024 : plan.post === 'full' ? 3072 : 2048, lightFx ? 1024 : plan.post === 'full' ? 3072 : 2048]}
+        // The map spans up to 100 m of site: 2048 is a ~4 cm texel. 3072 was tried and
+        // measured: +4 ms a frame on an M2 for no visible gain at gameplay angles.
+        shadow-mapSize={[lightFx ? 1024 : 2048, lightFx ? 1024 : 2048]}
         shadow-camera-left={-(LEVEL?.shadowHalf ?? 22)} shadow-camera-right={LEVEL?.shadowHalf ?? 22}
         shadow-camera-top={LEVEL?.shadowHalf ?? 22} shadow-camera-bottom={-(LEVEL?.shadowHalf ?? 22)}
         shadow-camera-far={LEVEL ? 140 : 70} shadow-bias={-0.0004} shadow-normalBias={0.025}
@@ -4090,8 +4090,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         // Structured levels, full tier: half-resolution ambient occlusion (contact under
         // every barrier, pipe and vehicle the sun map cannot give), bloom for the
         // practicals, the filmic curve, then anti-aliasing and the lens.
-        <EffectComposer multisampling={0} enableNormalPass>
-          <N8AO aoRadius={1.1} intensity={1.8} distanceFalloff={1.2} quality="performance" halfRes color="#0a0b10" />
+        // No screen-space AO here: N8AO cost ~6 ms a frame on an M2 even half-res
+        // (measured), a third of the 60 fps budget. Grounding comes from the sun's
+        // shadows and the baked contact pads under every structure (LevelArt).
+        <EffectComposer multisampling={0}>
           <Bloom intensity={mission.zone !== 'DUSTLINE' ? 0.22 : 0.12} luminanceThreshold={0.85} luminanceSmoothing={0.2} mipmapBlur />
           <ToneMapping mode={TONE_PP[tone.curve]} />
           <SMAA />

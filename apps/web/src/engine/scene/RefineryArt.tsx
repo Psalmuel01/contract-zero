@@ -15,7 +15,9 @@ import { buildColumn, buildFlareStack, buildLoadingArm, buildRackDetail, buildTa
  *   tank → the level's tank paint · steel → galvanised steel · pipe → painted pipe
  *   concrete → plinths · hazard → yellow · rust → oxidised fittings · dark → grating
  */
-const SHADOW: Record<KitMaterial, boolean> = { tank: true, steel: true, pipe: true, concrete: true, hazard: false, rust: true, dark: false };
+/** Only the big shells cast: the thin steel (rails, stairs, seams, hangers) would be
+ *  redrawn into every shadow pass for shadows thinner than a texel. */
+const SHADOW: Record<KitMaterial, boolean> = { tank: true, steel: false, pipe: false, concrete: true, hazard: false, rust: false, dark: false };
 
 /** The box corner a tank's stair tower faces: toward the road (x = 0) and the gate (+z). */
 function stairCornerFor(x: number, z: number): number {

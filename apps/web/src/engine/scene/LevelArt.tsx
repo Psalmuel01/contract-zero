@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import type { Art, Box, LevelDef } from '../fps/levels';
 import { usePbr } from './usePbr';
 import { idleProps, isDelivering, type WorldCues } from '../fps/lineProps';
+import { RefineryArt } from './RefineryArt';
 
 const HANGAR = '/textures/hangar';
 
@@ -88,9 +89,32 @@ function kitMaterials(module: string, keys: string[], mats: Record<string, THREE
 }
 /** Small or flat pieces whose shadows nobody reads: skipping them keeps the shadow pass cheap. */
 // Kit cases keep the originals' rule: a knee-high case's shadow is not worth a shadow draw.
-const NO_SHADOW = ['glass', 'panel', 'lampHead', 'redLed', 'screen', 'road', 'yellow', 'steel', 'frame', 'case', 'stripe', 'skirting', 'wood', 'signBar', 'authored_case'];
+const NO_SHADOW = ['glass', 'panel', 'lampHead', 'redLed', 'screen', 'road', 'yellow', 'steel', 'frame', 'case', 'stripe', 'skirting', 'wood', 'signBar', 'authored_case', 'aoPad'];
+
+/** Which structures get a baked contact pad, and how far it spreads past the footprint. */
+const AO_PAD: Record<string, number> = {
+  tank: 1.5, column: 1.9, truck: 1.3, flatbed: 1.3, container: 1.35, warehouse: 1.12,
+  booth: 1.5, crate: 1.55, pump: 1.8, tower_leg: 2.4, server: 1.5, drum: 1.9, case: 1.6,
+};
 const CYL = new THREE.CylinderGeometry(0.5, 0.5, 1, 20);
 const WHEEL = new THREE.CylinderGeometry(0.5, 0.5, 1, 14).rotateZ(Math.PI / 2);
+const PAD = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+
+/** A soft radial falloff, drawn once: the baked contact shadow under a structure. */
+let aoPadTex: THREE.Texture | null = null;
+function aoPadTexture(): THREE.Texture {
+  if (aoPadTex) return aoPadTex;
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  const grd = g.createRadialGradient(64, 64, 10, 64, 64, 64);
+  grd.addColorStop(0, 'rgba(0,0,0,0.42)');
+  grd.addColorStop(0.55, 'rgba(0,0,0,0.3)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grd; g.fillRect(0, 0, 128, 128);
+  aoPadTex = new THREE.CanvasTexture(c);
+  return aoPadTex;
+}
 
 /** Chain-link texture, drawn once. */
 function chainLink(): THREE.Texture {
@@ -182,7 +206,7 @@ function Blinker({ x, y, z, color }: { x: number; y: number; z: number; color: s
 }
 
 /** A refinery flare stack: a tall steel stack and a flame that never quite settles. */
-function FlareStack({ x, z, h, calm = false, out = false }: { x: number; z: number; h: number; calm?: boolean; /** The line it burns for is down: no flame, no glow. */ out?: boolean }) {
+function FlareStack({ x, z, h, calm = false, out = false, body = true }: { x: number; z: number; h: number; calm?: boolean; /** The line it burns for is down: no flame, no glow. */ out?: boolean; /** Draw the plain stack body (the refinery kit builds a lattice derrick on the full tiers). */ body?: boolean }) {
   const flame = useRef<THREE.Mesh>(null);
   const light = useRef<THREE.PointLight>(null);
   useFrame((st) => {
@@ -194,8 +218,8 @@ function FlareStack({ x, z, h, calm = false, out = false }: { x: number; z: numb
   });
   return (
     <group position={[x, 0, z]}>
-      <mesh position={[0, h / 2, 0]} castShadow><cylinderGeometry args={[0.45, 0.7, h, 14]} /><meshStandardMaterial color="#5a5c5f" roughness={0.5} metalness={0.7} /></mesh>
-      {[0.25, 0.5, 0.75].map((f) => <mesh key={f} position={[0, h * f, 0]}><torusGeometry args={[0.62, 0.06, 6, 18]} /><meshStandardMaterial color="#8a2a20" /></mesh>)}
+      {body && <mesh position={[0, h / 2, 0]} castShadow><cylinderGeometry args={[0.45, 0.7, h, 14]} /><meshStandardMaterial color="#5a5c5f" roughness={0.5} metalness={0.7} /></mesh>}
+      {body && [0.25, 0.5, 0.75].map((f) => <mesh key={f} position={[0, h * f, 0]}><torusGeometry args={[0.62, 0.06, 6, 18]} /><meshStandardMaterial color="#8a2a20" /></mesh>)}
       <mesh ref={flame} position={[0, h + 1.1, 0]}><coneGeometry args={[0.7, 2.6, 12, 1, true]} /><meshBasicMaterial color="#ffb347" transparent opacity={0.85} side={THREE.DoubleSide} depthWrite={false} blending={THREE.AdditiveBlending} /></mesh>
       <pointLight ref={light} position={[0, h + 1.5, 0]} color="#ff8a3a" intensity={34} distance={40} decay={1.6} />
     </group>
@@ -331,9 +355,10 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       glass: new THREE.MeshStandardMaterial({ color: '#0b0e12', emissive: night ? '#8fb6ff' : '#ffcf8a', emissiveIntensity: night ? 0.9 : 0.35, roughness: 0.2 }),
       wood: tri(planks, { color: '#9a7a52', roughness: 0.9 }),
       case: new THREE.MeshStandardMaterial({ color: '#3f4733', roughness: 0.6, metalness: 0.3 }),
-      // Refinery tanks are smooth painted steel, not tread plate.
+      // Refinery tanks are painted steel: the plate's relief and wear under a flat
+      // paint (a plain colour went chalky by day, with nothing for the sun to catch).
       tank: level.id === 'cinder_yard'
-        ? new THREE.MeshStandardMaterial({ color: '#a9a69c', roughness: 0.55, metalness: 0.35 })
+        ? tri(painted(plate), { color: '#9e9b91', roughness: 0.62, metalness: 0.4 }, 3.2)
         : tri(plate, { color: '#c8c3b8', roughness: 0.45, metalness: 0.6 }, 2.4),
       rust: tri(plate, { color: '#7a4a32', roughness: 0.7, metalness: 0.45 }, 2.4),
       pipe: new THREE.MeshStandardMaterial({ color: '#6b6e72', roughness: 0.45, metalness: 0.7 }),
@@ -354,6 +379,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       drum: new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.55, metalness: 0.5 }),
       signBar: new THREE.MeshBasicMaterial({ color: '#ffffff' }),
       mattress: new THREE.MeshStandardMaterial({ color: '#cfd6dc', roughness: 0.9 }),
+      aoPad: new THREE.MeshBasicMaterial({ map: aoPadTexture(), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 }),
     };
   }, [corrugated, plate, concrete, asphalt, plaster, planks, night, level.id, minimal]);
 
@@ -367,6 +393,12 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       const len = alongZ ? d : w, wid = alongZ ? w : d;
       const ry = alongZ ? 0 : Math.PI / 2;
       const fwd = (t: number): [number, number] => (alongZ ? [x, z + t] : [x + t, z]);
+      // Baked contact shadow: a soft dark pad under every sizeable structure, so things
+      // sit on the ground without a per-frame AO pass (measured: N8AO cost 6 ms here).
+      if (!minimal) {
+        const padScale = AO_PAD[b.kind as string];
+        if (padScale) add('aoPad', { x, y: 0.03, z, sx: w * padScale, sy: 1, sz: d * padScale });
+      }
       switch (b.kind) {
         case 'container': {
           if (!minimal) { add('authored_container', { x, y: h / 2, z, sx: w, sy: h, sz: d, color: b.color }); break; }
@@ -400,6 +432,8 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           add('concrete', { x, y: h * 0.7, z, sx: alongZ ? w * 0.45 : w, sy: h * 0.6, sz: alongZ ? d : d * 0.45 });
           break;
         case 'tank':
+          // The refinery kit builds the real tank on the full tiers (RefineryArt below).
+          if (!minimal) break;
           add('tankCyl', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           add('steel', { x, y: h + 0.05, z, sx: w * 0.7, sy: 0.1, sz: d * 0.7 });
           // Weld seams, a safety band under the lip, a ladder with its cage, and a roof hatch.
@@ -461,6 +495,7 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
           break;
         case 'column':
           // A fractionation column: a tall vessel ringed with platforms and a ladder cage.
+          if (!minimal) break; // the kit's column on the full tiers
           add('tankCyl', { x, y: h / 2, z, sx: w, sy: h, sz: d });
           for (const y of [h * 0.3, h * 0.6, h * 0.9]) {
             add('steel', { x, y, z, sx: w + 1.4, sy: 0.08, sz: d + 1.4 });
@@ -622,12 +657,16 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
         : k === 'pipeCyl' ? <Instanced key={k} items={items} material={mats.pipe} geometry={CYL} cast={cast} />
         : k === 'drumCyl' ? <Instanced key={k} items={items} material={mats.drum} geometry={CYL} cast={cast} />
         : k === 'hazardCyl' ? <Instanced key={k} items={items} material={mats.hazard} geometry={CYL} cast={false} />
+        : k === 'aoPad' ? <Instanced key={k} items={items} material={mats.aoPad} geometry={PAD} cast={false} />
         : k === 'tire' ? <Instanced key={k} items={items} material={mats.tire} geometry={WHEEL} cast={false} />
         : k === 'fenceMesh' ? <Instanced key={k} items={items} material={mats.fence} cast={false} />
         : <Instanced key={k} items={items} material={(mats as Record<string, THREE.Material>)[k] ?? mats.concrete} cast={cast && !NO_SHADOW.includes(k)} />,
       )}
       {beacons.map((b, i) => <Blinker key={i} x={b.x} y={b.h ?? 5} z={b.z} color={b.color ?? '#ff3b30'} />)}
-      {level.art.filter((a) => a.kind === 'stack').map((a, i) => <FlareStack key={`stack${i}`} x={a.x} z={a.z} h={a.h ?? 20} calm={calm} out={idle.art.has(a)} />)}
+      {/* The plant at its real size (tanks, columns, rack detail, the flare derrick, the
+          loading arm, wall services), one merged mesh per material. Full tiers only. */}
+      {!minimal && <RefineryArt level={level} mats={mats} />}
+      {level.art.filter((a) => a.kind === 'stack').map((a, i) => <FlareStack key={`stack${i}`} x={a.x} z={a.z} h={a.h ?? 20} calm={calm} out={idle.art.has(a)} body={minimal} />)}
       {level.art.filter((a) => a.kind === 'steam' && !idle.art.has(a)).map((a, i) => <Steam key={`steam${i}`} x={a.x} z={a.z} minimal={minimal} />)}
       {idle.lines.map((l) => <OfflineMarker key={`${l.resource}-${l.line}`} x={l.anchor[0]} z={l.anchor[1]} />)}
       {delivering && [...level.walls, ...level.cover].filter((b) => b.kind === 'truck' && !idle.boxes.has(b)).map((b, i) => <DeliveryBeacon key={`dlv${i}`} x={b.x} z={b.z} y={(b.h ?? 2.6) + 0.1} />)}
