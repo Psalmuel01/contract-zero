@@ -62,7 +62,7 @@ export function KeyboardDiagram({ binds }: { binds: Binds }) {
 /** The touch HUD, schematic: a phone held landscape. */
 export function TouchDiagram() {
   const btn = (label: string, style: React.CSSProperties, color = '#e9edf2', round = true) => (
-    <div className="absolute grid place-items-center text-center text-[9px] font-bold uppercase leading-tight tracking-wider" style={{ border: `1px solid ${color}`, color, borderRadius: round ? '50%' : 4, background: `${color}14`, ...style }}>{label}</div>
+    <div className="absolute grid place-items-center text-center text-[6.5px] font-bold uppercase leading-tight tracking-normal sm:text-[9px] sm:tracking-wider" style={{ border: `1px solid ${color}`, color, borderRadius: round ? '50%' : 4, background: `${color}14`, ...style }}>{label}</div>
   )
   return (
     <figure className="my-2" aria-label="Touch control layout on a phone held landscape" data-testid="touch-diagram">

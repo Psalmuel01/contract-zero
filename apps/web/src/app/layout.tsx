@@ -9,6 +9,8 @@ const body = Barlow({ subsets: ['latin'], weight: ['400', '500', '600'], variabl
 export const metadata: Metadata = {
   title: 'CONTRACT ZERO',
   description: 'A tactical extraction shooter in a war economy run by rival AI factions.',
+  // Added to an iPhone's Home Screen, it opens with no browser bars (iPhone Safari has no Fullscreen API).
+  appleWebApp: { capable: true, title: 'Contract Zero', statusBarStyle: 'black' },
 }
 
 export const viewport = {

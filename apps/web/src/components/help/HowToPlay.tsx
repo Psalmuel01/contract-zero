@@ -54,8 +54,8 @@ export function HowToPlay({ onClose, initial }: { onClose: () => void; initial?:
   }, [onClose])
   if (typeof document === 'undefined') return null
   return createPortal(
-    <div className="fixed inset-0 z-[200] grid place-items-center bg-ink/80 p-3 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div ref={box} role="dialog" aria-modal="true" aria-labelledby="htp-title" className="cz-panel flex max-h-[92vh] w-full max-w-3xl flex-col text-fog" data-testid="how-to-play-dialog">
+    <div className="fixed inset-0 z-[200] grid grid-cols-[minmax(0,1fr)] place-items-center bg-ink/80 p-3 backdrop-blur-sm" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div ref={box} role="dialog" aria-modal="true" aria-labelledby="htp-title" className="cz-panel flex max-h-[92vh] w-full min-w-0 max-w-3xl flex-col text-fog" data-testid="how-to-play-dialog">
         <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3">
           <h2 id="htp-title" className="font-display text-lg font-bold uppercase tracking-[0.16em]">Field manual</h2>
           <a href={PLAYER_GUIDE_URL} target="_blank" rel="noreferrer noopener" className="text-xs text-steel underline">Full guide ↗</a>
