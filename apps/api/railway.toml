@@ -7,6 +7,8 @@ dockerfilePath = "Dockerfile"
 healthcheckPath = "/health"
 # The first boot runs every migration before it binds.
 healthcheckTimeout = 120
-restartPolicyType = "ON_FAILURE"
+# ALWAYS: a crash loop during a database outage must keep trying, not give up after
+# a few restarts (it did, for hours). The API itself now waits for the database.
+restartPolicyType = "ALWAYS"
 # One world, one writer (an advisory lock refuses a second instance).
 numReplicas = 1

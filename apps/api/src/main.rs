@@ -58,6 +58,9 @@ pub const WORLD_WRITER_LOCK: i64 = 0x0C2E_0001;
 
 /// How often the instance confirms it still holds the world lock.
 const WRITER_CHECK_SECS: u64 = 10;
+/// Consecutive stalled checks (each WRITER_STALL_SECS) before giving the lock up for lost.
+const WRITER_MAX_STALLS: u32 = 3;
+const WRITER_STALL_SECS: u64 = 30;
 
 /// Losing the world lock means another instance may already be writing: stop now.
 fn fatal_writer(why: &str) -> ! {
@@ -130,7 +133,22 @@ async fn main() -> anyhow::Result<()> {
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let connect_opts = PgConnectOptions::from_str(&database_url).expect("Invalid DATABASE_URL");
-    let db = PgPoolOptions::new().max_connections(20).connect_with(connect_opts).await?;
+    // Wait for the database instead of exiting: a host restarting a crashing service
+    // gives up after a few tries, and a database blip (Supabase was unreachable for a
+    // few minutes on 2026-11-13) then left the API down for hours.
+    let db = {
+        let mut wait = 2u64;
+        loop {
+            match PgPoolOptions::new().max_connections(20).acquire_timeout(std::time::Duration::from_secs(15)).connect_with(connect_opts.clone()).await {
+                Ok(db) => break db,
+                Err(e) => {
+                    tracing::warn!("database not reachable ({e}); retrying in {wait}s");
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    wait = (wait * 2).min(30);
+                }
+            }
+        }
+    };
 
     // Apply pending migrations before serving; a failure aborts boot on purpose.
     migrate::run(&db).await?;
@@ -181,20 +199,30 @@ async fn main() -> anyhow::Result<()> {
     // platform restart this instance cleanly.
     tokio::spawn(async move {
         let mut writer = writer;
+        let mut stalls = 0u32;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(WRITER_CHECK_SECS)).await;
             let held = tokio::time::timeout(
-                std::time::Duration::from_secs(WRITER_CHECK_SECS),
+                std::time::Duration::from_secs(WRITER_STALL_SECS),
                 sqlx::query_as::<_, (bool,)>("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() AND granted AND ((classid::bigint << 32) | objid::bigint) = $1)")
                     .bind(WORLD_WRITER_LOCK)
                     .fetch_one(&mut writer),
             )
             .await;
+            // Exit on evidence only: the lock is gone, or the connection is broken (the
+            // session, and with it the lock, is then gone too). A slow answer is not
+            // evidence; one 10 s stall during a database blip took production down.
             match held {
-                Ok(Ok((true,))) => {}
+                Ok(Ok((true,))) => stalls = 0,
                 Ok(Ok((false,))) => fatal_writer("the world lock is no longer held by this instance"),
                 Ok(Err(e)) => fatal_writer(&format!("the connection holding the world lock failed: {e}")),
-                Err(_) => fatal_writer("the connection holding the world lock stopped answering"),
+                Err(_) => {
+                    stalls += 1;
+                    tracing::warn!("the world-lock check stalled ({stalls} in a row)");
+                    if stalls >= WRITER_MAX_STALLS {
+                        fatal_writer("the connection holding the world lock stopped answering");
+                    }
+                }
             }
         }
     });
