@@ -139,7 +139,18 @@ async fn main() -> anyhow::Result<()> {
     let db = {
         let mut wait = 2u64;
         loop {
-            match PgPoolOptions::new().max_connections(20).acquire_timeout(std::time::Duration::from_secs(15)).connect_with(connect_opts.clone()).await {
+            // Small and self-releasing. Supabase's session pooler allows 15 clients for the
+            // whole project; at 20 the API could take every slot (more during a deploy, when
+            // two instances overlap), and a tick holding the world lock then waited on a
+            // connection that never came: /world and /board hung into 502s (2026-11-14).
+            let max = std::env::var("DB_MAX_CONNECTIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(6u32).max(2);
+            match PgPoolOptions::new()
+                .max_connections(max)
+                .min_connections(1)
+                .acquire_timeout(std::time::Duration::from_secs(10))
+                .idle_timeout(std::time::Duration::from_secs(60))
+                .max_lifetime(std::time::Duration::from_secs(30 * 60))
+                .connect_with(connect_opts.clone()).await {
                 Ok(db) => break db,
                 Err(e) => {
                     tracing::warn!("database not reachable ({e}); retrying in {wait}s");

@@ -109,9 +109,11 @@ impl WorldService {
     where
         F: AsyncFnOnce(&mut World, &mut PgConnection) -> Result<T, WorldError>,
     {
+        // The connection first, THEN the world: waiting on a busy pool while holding the
+        // world lock froze every world read behind it (/world, /board into 502s).
+        let mut tx = self.db.begin().await?;
         let mut w = self.world.lock().await;
         let before = w.clone();
-        let mut tx = self.db.begin().await?;
         let result = async {
             let out = f(&mut w, &mut tx).await?;
             if w.version != before.version {
