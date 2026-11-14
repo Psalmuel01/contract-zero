@@ -1,6 +1,6 @@
 'use client'
 
-// The insertion briefing: a letterboxed card between accepting a contract and
+// The insertion briefing: a full-screen card between accepting a contract and
 // choosing a loadout. The operation's codename, where and when, then the cast's lines one at a
 // time over radio static. Every line comes from the server's story (facts it can
 // vouch for); nothing here is invented on the client.
@@ -88,7 +88,6 @@ export function Briefing({ story, pending, onDeploy, actionLabel = 'Deploy', con
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#050607] text-fog" data-testid="briefing">
-      <div className="h-[9vh] shrink-0 bg-black" />
       <div className="relative flex flex-1 flex-col overflow-y-auto px-6 py-4 sm:px-16">
         <div className="pointer-events-none absolute inset-0 opacity-[0.07]" style={{ backgroundImage: 'repeating-linear-gradient(0deg, #fff 0 1px, transparent 1px 3px)' }} />
         <div className={`relative mx-auto my-auto grid w-full gap-8 ${contract ? 'max-w-6xl lg:grid-cols-[1fr_20rem]' : 'max-w-3xl'}`}>
@@ -123,7 +122,6 @@ export function Briefing({ story, pending, onDeploy, actionLabel = 'Deploy', con
           {contract && <Facts contract={contract} kind={kind} pay={pay} />}
         </div>
       </div>
-      <div className="h-[9vh] shrink-0 bg-black" />
     </div>
   )
 }
