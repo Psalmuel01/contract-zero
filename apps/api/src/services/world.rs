@@ -42,10 +42,19 @@ const KEEP_SNAPSHOTS: i64 = 500;
 impl WorldService {
     /// Load the latest snapshot, or create the genesis world from `WORLD_SEED`.
     pub async fn load(db: PgPool, near: Option<Arc<super::near::NearClient>>) -> anyhow::Result<Self> {
-        let latest: Option<(Value,)> =
-            sqlx::query_as("SELECT state FROM world_snapshots ORDER BY id DESC LIMIT 1").fetch_optional(&db).await?;
+        let latest: Option<(Value, Option<i64>)> =
+            sqlx::query_as("SELECT state, ledger_len FROM world_snapshots ORDER BY id DESC LIMIT 1").fetch_optional(&db).await?;
         let world = match latest {
-            Some((state,)) => serde_json::from_value(state)?,
+            Some((state, ledger_len)) => {
+                let mut w: World = serde_json::from_value(state)?;
+                match ledger_len {
+                    // Current format: the snapshot holds the ledger's tail; the rest is in world_ledger.
+                    Some(n) => w.ledger = load_ledger(&db, n, &w.ledger).await?,
+                    // Old format (ledger inline): copy it into world_ledger once, before serving.
+                    None => backfill_ledger(&db, &w).await?,
+                }
+                w
+            }
             None => {
                 // WORLD_SCENARIO=acceptance starts from the end-to-end acceptance state.
                 let scenario = std::env::var("WORLD_SCENARIO").unwrap_or_default();
@@ -54,7 +63,8 @@ impl WorldService {
                 } else {
                     cz_economy::genesis(std::env::var("WORLD_SEED").ok().and_then(|s| s.parse().ok()).unwrap_or(2026))
                 };
-                persist(&mut *db.acquire().await?, &w).await?;
+                let mut w = w;
+                persist(&mut *db.acquire().await?, &mut w).await?;
                 tracing::info!("world: created {} world (seed {})", if scenario == "acceptance" { "acceptance" } else { "genesis" }, w.seed);
                 w
             }
@@ -65,13 +75,13 @@ impl WorldService {
         let mut world: World = world;
         let can_sign = near.as_ref().is_none_or(|n| n.actor_account("ashen").is_some());
         if world.market.living && can_sign && cz_economy::add_rival(&mut world) {
-            persist(&mut *db.acquire().await?, &world).await?;
+            persist(&mut *db.acquire().await?, &mut world).await?;
             tracing::info!("world: the Ashen Compact joined at tick {}", world.tick);
         }
         // Likewise the second merchant, Halcyon Logistics.
         let can_sign = near.as_ref().is_none_or(|n| n.actor_account("halcyon").is_some());
         if world.market.living && can_sign && cz_economy::add_halcyon(&mut world) {
-            persist(&mut *db.acquire().await?, &world).await?;
+            persist(&mut *db.acquire().await?, &mut world).await?;
             tracing::info!("world: Halcyon Logistics joined at tick {}", world.tick);
         }
         tracing::info!("world: loaded at tick {} (version {})", world.tick, world.version);
@@ -117,7 +127,7 @@ impl WorldService {
         let result = async {
             let out = f(&mut w, &mut tx).await?;
             if w.version != before.version {
-                persist(&mut tx, &w).await?;
+                persist(&mut tx, &mut w).await?;
             }
             Ok::<T, WorldError>(out)
         }
@@ -227,18 +237,79 @@ fn strategic_changes(before: &World, after: &World) -> Vec<Value> {
     events
 }
 
-async fn persist(db: &mut PgConnection, w: &World) -> Result<(), sqlx::Error> {
-    let state = serde_json::to_value(w).expect("world serializes");
-    sqlx::query("INSERT INTO world_snapshots (tick, version, state) VALUES ($1, $2, $3)")
+/// Ledger entries a snapshot keeps inline: checked against world_ledger on load.
+const LEDGER_TAIL: usize = 64;
+
+/// Save the world: append the ledger entries world_ledger doesn't have yet, then insert a
+/// snapshot of everything else (the ledger's length and last LEDGER_TAIL entries only).
+/// Both go into the caller's transaction, so they commit or roll back together.
+async fn persist(db: &mut PgConnection, w: &mut World) -> Result<(), sqlx::Error> {
+    let len = w.ledger.len();
+    let (have,): (Option<i64>,) = sqlx::query_as("SELECT max(seq) FROM world_ledger").fetch_one(&mut *db).await?;
+    let from = have.map_or(0, |s| (s + 1).max(0) as usize).min(len);
+    if from < len {
+        append_ledger(&mut *db, &w.ledger[from..]).await?;
+    }
+    // Serialize the world with only the ledger's tail, then put the full ledger back.
+    let full = std::mem::take(&mut w.ledger);
+    w.ledger = full[len.saturating_sub(LEDGER_TAIL)..].to_vec();
+    let state = serde_json::to_value(&*w).expect("world serializes");
+    w.ledger = full;
+    sqlx::query("INSERT INTO world_snapshots (tick, version, state, ledger_len) VALUES ($1, $2, $3, $4)")
         .bind(w.tick as i64)
         .bind(w.version as i64)
         .bind(state)
+        .bind(len as i64)
         .execute(&mut *db)
         .await?;
     sqlx::query("DELETE FROM world_snapshots WHERE id <= (SELECT max(id) FROM world_snapshots) - $1")
         .bind(KEEP_SNAPSHOTS)
         .execute(&mut *db)
         .await?;
+    Ok(())
+}
+
+/// Insert ledger entries (one statement). An existing row at the same seq is replaced:
+/// after a manual restore to an older snapshot, the restored timeline's entries win.
+async fn append_ledger(db: &mut PgConnection, entries: &[cz_economy::LedgerEntry]) -> Result<(), sqlx::Error> {
+    let rows = serde_json::to_value(entries).expect("ledger serializes");
+    sqlx::query(
+        "INSERT INTO world_ledger (seq, tick, entry) SELECT (e->>'seq')::bigint, (e->>'tick')::bigint, e FROM jsonb_array_elements($1) AS e \
+         ON CONFLICT (seq) DO UPDATE SET tick = excluded.tick, entry = excluded.entry",
+    )
+    .bind(rows)
+    .execute(&mut *db)
+    .await?;
+    Ok(())
+}
+
+/// Reassemble the ledger for a snapshot of length `len`, and refuse a ledger that doesn't
+/// match it exactly: every seq 0..len present in order, and the last entries equal to the
+/// ones the snapshot kept. A world with a damaged ledger would mis-settle on chain.
+async fn load_ledger(db: &PgPool, len: i64, tail: &[cz_economy::LedgerEntry]) -> anyhow::Result<Vec<cz_economy::LedgerEntry>> {
+    let rows: Vec<(Value,)> = sqlx::query_as("SELECT entry FROM world_ledger WHERE seq < $1 ORDER BY seq").bind(len).fetch_all(db).await?;
+    if rows.len() as i64 != len {
+        anyhow::bail!("world ledger: the snapshot has {len} entries, world_ledger has {}; refusing to start", rows.len());
+    }
+    let ledger: Vec<cz_economy::LedgerEntry> = rows.into_iter().map(|(v,)| serde_json::from_value(v)).collect::<Result<_, _>>()?;
+    if let Some(bad) = ledger.iter().enumerate().find(|(i, e)| e.seq != *i as u64) {
+        anyhow::bail!("world ledger: entry {} has seq {}; refusing to start", bad.0, bad.1.seq);
+    }
+    if !tail.is_empty() && ledger[ledger.len() - tail.len()..] != *tail {
+        anyhow::bail!("world ledger: its last {} entries differ from the snapshot's; refusing to start", tail.len());
+    }
+    tracing::info!("world ledger: {} entries loaded and checked", ledger.len());
+    Ok(ledger)
+}
+
+/// One-time move of an old-format snapshot's inline ledger into world_ledger (idempotent).
+async fn backfill_ledger(db: &PgPool, w: &World) -> anyhow::Result<()> {
+    let mut tx = db.begin().await?;
+    for chunk in w.ledger.chunks(5_000) {
+        append_ledger(&mut tx, chunk).await?;
+    }
+    tx.commit().await?;
+    tracing::info!("world ledger: {} entries copied from the old-format snapshot", w.ledger.len());
     Ok(())
 }
 
@@ -357,4 +428,78 @@ mod tests {
         assert_eq!(n, 1);
         sqlx::query("DELETE FROM world_events WHERE source = $1").bind(&tag).execute(&db).await.unwrap();
     }
+
+    /// The ledger lives in world_ledger: a saved world reloads identically, an old-format
+    /// snapshot migrates once, a damaged ledger refuses to load, and a rolled-back save
+    /// leaves no ledger rows. Needs CZ_DB_TESTS=1 and CZ_LEDGER_TEST_DB: a SCRATCH database
+    /// URL (the test empties its world tables).
+    #[tokio::test]
+    async fn the_ledger_table_round_trips_migrates_and_refuses_damage() {
+        if std::env::var("CZ_DB_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let url = std::env::var("CZ_LEDGER_TEST_DB").expect("CZ_LEDGER_TEST_DB: a scratch database");
+        assert!(!url.contains("supabase"), "never against production");
+        let db = PgPool::connect(&url).await.unwrap();
+        crate::migrate::run(&db).await.unwrap();
+        let reset = || async { sqlx::query("TRUNCATE world_snapshots, world_ledger").execute(&db).await.unwrap(); };
+
+        // 1. a saved world reloads identically, ledger included
+        reset().await;
+        let mut w = cz_economy::acceptance();
+        while w.ledger.len() <= LEDGER_TAIL * 3 { w.tick(); }
+        assert!(w.ledger.len() > LEDGER_TAIL, "the test world has a real ledger ({})", w.ledger.len());
+        persist(&mut *db.acquire().await.unwrap(), &mut w).await.unwrap();
+        let loaded = WorldService::load(db.clone(), None).await.unwrap();
+        let back = loaded.read(|x| x.clone()).await;
+        assert_eq!(back.ledger, w.ledger);
+        assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::to_value(&w).unwrap(), "the whole world round-trips");
+        let (stored_len,): (i64,) = sqlx::query_as("SELECT jsonb_array_length(state->'ledger')::bigint FROM world_snapshots ORDER BY id DESC LIMIT 1").fetch_one(&db).await.unwrap();
+        assert_eq!(stored_len as usize, LEDGER_TAIL, "the snapshot keeps only the tail");
+
+        // a later save appends only the new entries
+        let mut w2 = back;
+        let before = w2.ledger.len();
+        w2.tick();
+        persist(&mut *db.acquire().await.unwrap(), &mut w2).await.unwrap();
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM world_ledger").fetch_one(&db).await.unwrap();
+        assert_eq!(rows as usize, w2.ledger.len());
+        assert!(w2.ledger.len() >= before);
+
+        // 2. an old-format snapshot (ledger inline, no ledger_len) loads and backfills once
+        reset().await;
+        sqlx::query("INSERT INTO world_snapshots (tick, version, state) VALUES ($1, $2, $3)")
+            .bind(w.tick as i64).bind(w.version as i64).bind(serde_json::to_value(&w).unwrap()).execute(&db).await.unwrap();
+        let loaded = WorldService::load(db.clone(), None).await.unwrap();
+        assert_eq!(loaded.read(|x| x.ledger.clone()).await, w.ledger);
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM world_ledger").fetch_one(&db).await.unwrap();
+        assert_eq!(rows as usize, w.ledger.len(), "backfilled");
+        loaded.transact(async move |x, _| { x.version += 1; Ok(()) }).await.unwrap();
+        let (len,): (Option<i64>,) = sqlx::query_as("SELECT ledger_len FROM world_snapshots ORDER BY id DESC LIMIT 1").fetch_one(&db).await.unwrap();
+        assert_eq!(len, Some(w.ledger.len() as i64), "the next save is the new format");
+        assert_eq!(WorldService::load(db.clone(), None).await.unwrap().read(|x| x.ledger.clone()).await, w.ledger);
+
+        // 3. damage refuses to load: a missing entry, then an altered one
+        sqlx::query("DELETE FROM world_ledger WHERE seq = 3").execute(&db).await.unwrap();
+        assert!(WorldService::load(db.clone(), None).await.is_err(), "a missing entry");
+        let e3 = serde_json::to_value(&w.ledger[3]).unwrap();
+        sqlx::query("INSERT INTO world_ledger (seq, tick, entry) VALUES (3, $1, $2)").bind(w.ledger[3].tick as i64).bind(e3).execute(&db).await.unwrap();
+        assert!(WorldService::load(db.clone(), None).await.is_ok(), "repaired");
+        let last = (w.ledger.len() - 1) as i64;
+        sqlx::query("UPDATE world_ledger SET entry = jsonb_set(entry, '{qty}', to_jsonb((entry->>'qty')::bigint + 1)) WHERE seq = $1").bind(last).execute(&db).await.unwrap();
+        assert!(WorldService::load(db.clone(), None).await.is_err(), "an altered entry");
+
+        // 4. a rolled-back save leaves no ledger rows
+        reset().await;
+        let mut w3 = cz_economy::acceptance();
+        persist(&mut *db.acquire().await.unwrap(), &mut w3).await.unwrap();
+        let svc = WorldService::load(db.clone(), None).await.unwrap();
+        let n0 = svc.read(|x| x.ledger.len()).await;
+        let r: Result<(), WorldError> = svc.transact(async move |x, _| { x.tick(); Err(WorldError::Other("fails".into())) }).await;
+        assert!(r.is_err());
+        let (rows,): (i64,) = sqlx::query_as("SELECT count(*) FROM world_ledger").fetch_one(&db).await.unwrap();
+        assert_eq!(rows as usize, n0, "no rows from the rolled-back tick");
+        assert_eq!(svc.read(|x| x.ledger.len()).await, n0);
+    }
+
 }

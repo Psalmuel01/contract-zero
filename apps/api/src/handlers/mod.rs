@@ -1,6 +1,7 @@
 use actix_web::{web, HttpResponse};
 
 pub mod auth;
+pub mod cache;
 pub mod exchange;
 pub mod intents;
 pub mod missions;
