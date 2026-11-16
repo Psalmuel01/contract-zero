@@ -31,6 +31,7 @@ import { worldClock } from '../fps/lineProps';
 import { computeEdgeArrow } from '../verb/threatArrow';
 import { useGunPrototypes, ALL_GUN_IDS, GUN_LENGTH } from './gunModels';
 import { OperatorRig, type OperatorApi } from './OperatorRig';
+import { enemyGait } from './enemyGait';
 import { LEVELS } from '../fps/levels';
 import { groundHeight, railedMove } from '../fps/decks';
 import { LevelArt } from './LevelArt';
@@ -1288,6 +1289,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   // sampled — a puff of dust is spent per STRIDE walked (see the rig loop).
   const enemyStepDist = useRef<number[]>(ENEMY_SLOTS.map(() => 0));
   const enemyStepPos = useRef<[number, number][]>(ENEMY_SLOTS.map((e) => [e.pos[0], e.pos[1]]));
+  // Each guard's motion as the eye sees it: last position and a smoothed velocity in
+  // world space, so the animation follows what the body actually does (walk, run,
+  // strafe, stand) instead of the AI's state alone. Presentation only.
+  const enemyMotion = useRef<{ x: number; z: number; vx: number; vz: number }[]>(ENEMY_SLOTS.map((e) => ({ x: e.pos[0], z: e.pos[1], vx: 0, vz: 0 })));
 
   // Co-op Endless (party mode) — a small fixed pool of teammate rigs,
   // repositioned each frame from the coop section of the loop below.
@@ -1624,6 +1629,11 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     w.__czXp = () => ({ careerXp: careerXp.current, rank: rankForXp(careerXp.current), intoRank: xpIntoRank(careerXp.current) });
     w.__czStory = () => ({ fired: [...storyFired.current], queued: voQueue.current.length });
     w.__czRig = () => rigApis.current[0]?.debug() ?? null;
+    // Every live guard's clip beside its real motion (dev probes check the gait).
+    w.__czGaits = () => sim.snapshot().enemies.map((e, i) => {
+      const mo = enemyMotion.current[i];
+      return { alive: e.alive, ai: e.ai, clip: rigApis.current[i]?.debug().clip ?? null, speed: mo ? +Math.hypot(mo.vx, mo.vz).toFixed(2) : 0, gait: mo ? enemyGait(mo.vx, mo.vz, e.facing) : null };
+    });
     w.__czPlayer = () => ({ x: +pos.current.x.toFixed(3), z: +pos.current.z.toFixed(3) });
     w.__czStagger = () => ({
       shoveX: +shoveX.current.toFixed(4), shoveZ: +shoveZ.current.toFixed(4),
@@ -1719,7 +1729,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     return () => {
       delete w.__czState; delete w.__czKillAll; delete w.__czKillRoom; delete w.__czKillPlayer; delete w.__czAim; delete w.__czAudio;
       delete w.__czMission; delete w.__czEndless; delete w.__czWarp; delete w.__czSkipBriefing; delete w.__czFloor;
-      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czAds; delete w.__czToggle;
+      delete w.__czXp; delete w.__czSetXp; delete w.__czStory; delete w.__czVo; delete w.__czAudio; delete w.__czRig; delete w.__czGaits; delete w.__czPlayer; delete w.__czColliders; delete w.__czFloor; delete w.__czCam; delete w.__czStagger; delete w.__czHurtBoss; delete w.__czWakeRoom; delete w.__czSwitch; delete w.__czFire; delete w.__czAds; delete w.__czToggle;
       delete w.__czRevive; delete w.__czResupply; delete w.__czWaveSkip; delete w.__czPerf; delete w.__czField; delete w.__czPath; delete w.__czRender; delete w.__czDrawStats; delete w.__czCull;
     };
   }, [sim, audio]);
@@ -2625,10 +2635,23 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       g.scale.set(1, 1, 1);
 
       const rig = rigApis.current[i];
+      // Smoothed velocity from this frame's real displacement (a teleport, e.g. a
+      // respawn, is ignored rather than read as a sprint).
+      const mo = enemyMotion.current[i] ?? (enemyMotion.current[i] = { x: e.x, z: e.z, vx: 0, vz: 0 });
+      {
+        const dx = e.x - mo.x, dz = e.z - mo.z;
+        const k = Math.min(1, dt * 10);
+        if (dt > 0 && Math.hypot(dx, dz) < 1.5) { mo.vx += (dx / dt - mo.vx) * k; mo.vz += (dz / dt - mo.vz) * k; }
+        else { mo.vx = 0; mo.vz = 0; }
+        mo.x = e.x; mo.z = e.z;
+      }
       if (rig) {
         if (!e.alive) rig.setClip('death');
-        else if (e.ai === 'seek') rig.setClip('run');   // maneuvering to a new angle
-        else rig.setClip('idle');                        // rifle shouldered
+        else {
+          const gait = enemyGait(mo.vx, mo.vz, e.facing);
+          rig.setClip(gait.clip);
+          rig.setRate(gait.rate);
+        }
         // No amber "I'm shooting you" glow: the shouldered rifle, the muzzle flash
         // and the round coming at you ARE the tell. Only a hit still flashes.
         const f = Math.max(0, dummyFlash.current[i] - now);

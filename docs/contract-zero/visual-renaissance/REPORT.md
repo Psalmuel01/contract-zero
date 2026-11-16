@@ -94,6 +94,25 @@ concrete Blacksite), and every wall played the same recorded bullet-on-metal sou
 - Fixed on the way: the Cinder Yard tanks wore the tread-plate relief (floor plating,
   obvious up close); now fine pitting under the paint.
 
+## Stage E: guards move the way their bodies move
+
+Before: any guard that was manoeuvring played `run` at one fixed rate, so a guard
+edging between cover ran on the spot and slid. The rig's `walk` and strafe clips were
+never used.
+
+- `scene/enemyGait.ts` picks the clip from the guard's real, smoothed velocity relative
+  to where it faces: standing below 0.3 m/s, strafing left or right when the motion is
+  mostly sideways (guards always face the player, so circling is a strafe), walking
+  when slow or backing off, running forward at manoeuvre speed. Each clip plays at a
+  rate matched to ground speed (bounded), so the feet keep pace. The AI, positions and
+  hitboxes are untouched.
+- Checked live (`probe-gait.mjs`, Dustline, rooms awake, 17 s): run 282 frames, idle
+  274, strafe 146, walk 68, peak speed 2.8 m/s (the sim's manoeuvre speed), 0
+  disagreements between the played clip and the gait. Before, all 455 manoeuvring
+  frames would have been `run`.
+- Not verified by eye: whether the model's `strafeL`/`strafeR` step to the side their
+  names say (stills can't show it). If mirrored, it is one line in `enemyGait.ts`.
+
 ## Stage E (partial): enemies and the HUD
 
 - Enemy rifles get the same `finishWeapon` surface pass as the player's weapons.

@@ -46,6 +46,8 @@ export interface OperatorApi {
   setClip(name: ClipName): void;
   /** Fire a one-shot clip over the top (returns to the looping clip after). */
   playOnce(name: ClipName, timeScale?: number): void;
+  /** Playback rate of the current looping clip, so footfalls keep pace with the ground. */
+  setRate(rate: number): void;
   /** Emissive tint: the aim telegraph (amber) and the hit flash (red). */
   setTint(hex: number, intensity: number): void;
   /** Diagnostics: where did the rifle actually end up? */
@@ -240,6 +242,11 @@ export const OperatorRig = forwardRef<OperatorApi, { modelPath: string }>(functi
       a.timeScale = timeScale;
       a.play();
       oneShot.current = a;
+    },
+    setRate(rate) {
+      if (dead.current || !current.current) return;
+      const a = actions.current[current.current];
+      if (a) a.timeScale = rate;
     },
     setTint(hex, intensity) {
       for (const m of mats.current) {
