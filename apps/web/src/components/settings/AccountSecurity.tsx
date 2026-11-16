@@ -18,6 +18,7 @@ import { Button, Group, Note, Row } from './controls'
 export function methodLabel(s: Session): string {
   if (s.method === 'wallet') return 'NEAR wallet'
   if (s.method === 'dev') return 'Developer login (testnet only)'
+  if (s.method === 'privy') return 'Email (your key held by Privy)'
   if (s.provider === 'google') return 'Google, through NEAR Auth'
   if (s.provider === 'apple') return 'Apple, through NEAR Auth'
   if (s.provider === 'email') return 'Email, through NEAR Auth'
