@@ -6,6 +6,7 @@ import { useGLTF } from '@react-three/drei';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import * as THREE from 'three';
 import { FPS_TUNING } from '../fps';
+import { rigClipName } from './rigClips';
 import { useRiflePrototype, cloneRifle } from './rifle';
 
 /** Melee props baked into the placeholder body. A shooter carries none of these. */
@@ -200,7 +201,7 @@ export const OperatorRig = forwardRef<OperatorApi, { modelPath: string }>(functi
     const mixer = new THREE.AnimationMixer(rig);
     mixerRef.current = mixer;
     for (const clip of animations) {
-      const name = clip.name as ClipName;
+      const name = rigClipName(clip.name);
       const action = mixer.clipAction(clip);
       actions.current[name] = action;
     }

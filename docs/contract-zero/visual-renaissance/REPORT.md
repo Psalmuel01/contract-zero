@@ -110,8 +110,12 @@ never used.
   274, strafe 146, walk 68, peak speed 2.8 m/s (the sim's manoeuvre speed), 0
   disagreements between the played clip and the gait. Before, all 455 manoeuvring
   frames would have been `run`.
-- Not verified by eye: whether the model's `strafeL`/`strafeR` step to the side their
-  names say (stills can't show it). If mirrored, it is one line in `enemyGait.ts`.
+- The strafe clips were mirrored, found by measuring rather than eyeballing: in
+  `operator.glb`, `strafeL`'s root motion travels 2.2 m to the character's right and
+  `strafeR` 1.5 m to its left (the armature only rotates about X; the left thigh sits
+  at +X, so left is +X). A guard circling right stepped left. `rigClips.ts` maps them to
+  the side they actually step, and a test reads the file to keep it so. Rechecked live:
+  strafeL 86 frames, strafeR 51, 0 clip/gait disagreements.
 
 ## Stage F: Cinder Yard's tanks by day
 
