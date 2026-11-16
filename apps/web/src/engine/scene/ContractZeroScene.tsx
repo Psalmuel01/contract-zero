@@ -12,6 +12,7 @@ import { makeTriplanarMaterial } from './triplanar';
 import { buildViewmodelHands, VIEWMODEL_HIP, VIEWMODEL_ADS, WEAPON_VIEW } from './viewmodelHands';
 import { buildZoneEnvironment, ENV_INTENSITY } from './zoneEnvironment';
 import { ImpactFX, type ImpactSurface } from '../vfx/ImpactFX';
+import { impactSurface } from '../vfx/impactSurface';
 import { useImpactTextures } from '../vfx/useImpactTextures';
 import { DroppedWeapon } from '../vfx/DroppedWeapon';
 import { ShellCasings } from '../vfx/ShellCasings';
@@ -2273,8 +2274,10 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         // A `miss` struck nothing at all — it is the round still travelling at the
         // end of the weapon's reach, so there is no surface to spark off. It used to
         // get one anyway, which put a puff of dust in mid-air 60m out.
+        // One surface decides both what the strike looks like and what it sounds like.
+        const struck = ev.kind === 'wall' ? surfaceAt(ev.point, ev.normal) : null;
         if (ev.kind === 'hit') spawnFleshImpact(ev.point, tmp2);
-        else if (ev.kind === 'wall') spawnImpact(ev.point, ev.normal, surfaceAt(ev.point, ev.normal), impactPower());
+        else if (ev.kind === 'wall') spawnImpact(ev.point, ev.normal, struck!, impactPower());
         if (ev.kind === 'hit') {
           audio.impact('flesh', ev.point);
           audio.hitmarker(ev.killed);
@@ -2289,7 +2292,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
             if (FINITE_AMMO) dropEnemyWeapon(ev.enemyId);
           }
         } else if (ev.kind === 'wall') {
-          audio.impact('wall', ev.point);
+          audio.impact('wall', ev.point, struck === 'flesh' || !struck ? 'metal' : struck);
         }
       } else if (ev.kind === 'attachment') {
         audio.reloadEnd();          // a soft toggle click
@@ -3351,15 +3354,13 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
    *  scene is what knows that the boxes in LEVEL_COVER are scorched planking and
    *  everything else is the compound's brick and plaster. */
   function surfaceAt(at: Vec3, normal: Vec3): ImpactSurface {
-    if (normal[1] > 0.9 && at[1] < 0.06) return 'dirt';
-    for (const c of LEVEL_COVER) {
-      if (
-        Math.abs(at[0] - c.x) <= c.w / 2 + 0.08
-        && Math.abs(at[2] - c.z) <= c.d / 2 + 0.08
-        && at[1] <= c.h + 0.08
-      ) return 'wood';
-    }
-    return 'concrete';
+    // Structured levels know what each box is (steel tank, concrete barrier, crate);
+    // campaign arenas don't, and keep the old split (cover = planking, walls = masonry).
+    return impactSurface(at, normal, {
+      cover: LEVEL_COVER, walls: LEVEL_WALLS,
+      floor: LEVEL?.floor.kind,
+      roads: LEVEL?.art.filter((a) => a.kind === 'road').map((a) => ({ x: a.x, z: a.z, w: a.w ?? 6, d: a.d ?? 40 })),
+    });
   }
 
   /** How big a burst the ACTIVE weapon throws. Rides the muzzle-flash scale each gun

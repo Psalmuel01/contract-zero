@@ -355,10 +355,11 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       glass: new THREE.MeshStandardMaterial({ color: '#0b0e12', emissive: night ? '#8fb6ff' : '#ffcf8a', emissiveIntensity: night ? 0.9 : 0.35, roughness: 0.2 }),
       wood: tri(planks, { color: '#9a7a52', roughness: 0.9 }),
       case: new THREE.MeshStandardMaterial({ color: '#3f4733', roughness: 0.6, metalness: 0.3 }),
-      // Refinery tanks are painted steel: the plate's relief and wear under a flat
-      // paint (a plain colour went chalky by day, with nothing for the sun to catch).
+      // Refinery tanks are weathered painted steel: fine pitting and roughness variation
+      // under a flat paint (a plain colour went chalky by day; the tread-plate relief
+      // tried first read as floor plating up close).
       tank: level.id === 'cinder_yard'
-        ? tri(painted(plate), { color: '#9e9b91', roughness: 0.62, metalness: 0.4 }, 3.2)
+        ? tri(painted(concrete), { color: '#a29e94', roughness: 0.6, metalness: 0.35 }, 4.5)
         : tri(plate, { color: '#c8c3b8', roughness: 0.45, metalness: 0.6 }, 2.4),
       rust: tri(plate, { color: '#7a4a32', roughness: 0.7, metalness: 0.45 }, 2.4),
       pipe: new THREE.MeshStandardMaterial({ color: '#6b6e72', roughness: 0.45, metalness: 0.7 }),

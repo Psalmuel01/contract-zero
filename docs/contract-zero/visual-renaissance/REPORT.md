@@ -74,6 +74,26 @@ per-material meshes (Dustline 286 → 286 draws, Blacksite 292 → 294).
   Tested: banks run along real walls and never lie over a pickup, objective, cargo
   case or the extraction zone.
 
+## Stage E: impacts that match what was hit
+
+The effects library already had five surfaces (concrete, dirt, wood, metal, flesh),
+but the game picked between three, wrongly: every cover box was `wood` (a steel tank
+threw splinters), the ground was always `dirt` (even paved Cinder Yard and the
+concrete Blacksite), and every wall played the same recorded bullet-on-metal sound.
+
+- `vfx/impactSurface.ts` maps each collider's real kind to its material: steel for
+  tanks, trucks, containers, warehouse sheeting, racks, pumps, servers and lockers;
+  timber for crates; masonry for barriers and walls. The ground follows the site's
+  floor, with asphalt roads counted as concrete. Campaign arenas (no kinds) keep the
+  old split. Tested for every collider kind in every level.
+- One surface now drives both the burst and the sound: the recorded strike is voiced
+  per surface (steel at pitch; concrete lower and duller; timber duller; earth a
+  filtered thud), and only hard surfaces ricochet.
+- Checked in the running game: tight holes and sparks off a steel tank, a plume of
+  earth off the ground.
+- Fixed on the way: the Cinder Yard tanks wore the tread-plate relief (floor plating,
+  obvious up close); now fine pitting under the paint.
+
 ## Stage E (partial): enemies and the HUD
 
 - Enemy rifles get the same `finishWeapon` surface pass as the player's weapons.
