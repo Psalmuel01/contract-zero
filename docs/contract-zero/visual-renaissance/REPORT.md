@@ -113,6 +113,27 @@ never used.
 - Not verified by eye: whether the model's `strafeL`/`strafeR` step to the side their
   names say (stills can't show it). If mirrored, it is one line in `enemyGait.ts`.
 
+## Stage F: Cinder Yard's tanks by day
+
+By day the tank farm read as white paper against the smog sky (tank 164 luma, sky 196,
+at the start view). Measured, not guessed:
+
+- **Not the paint.** A much darker, less metallic paint moved the shell 13 points: the
+  sun, sky, fill and ambient together sit those faces on the tone curve's shoulder.
+- **Not the haze.** Pushing the day smog back (0.7 → 0.85 of the fog distance) changed
+  the shell by 0.3 points; reverted.
+- **Flatness.** Every shell was one clean paint from base to roof. `weather()` in
+  `refineryKit.ts` now bakes vertex colours into the merged tank/column geometry:
+  grime and rust bleed toward the base, fading by 11 m, uneven around the shell so the
+  gradient draws faint vertical streaks. One extra material (`tankKit`) so nothing
+  without the colours can turn black; no extra draws or textures.
+- Column skirts were wrapped in tread plate (read as floor plating); they are concrete
+  fireproofing now, as on real columns.
+
+Result: tank 138 (base 134, upper 145) against the same 196 sky: contrast 33 → 58. Night
+checked: shells hold their shape against the flare glow. Cinder Yard High 10.6 ms / 286
+draws (10.2 ms / 286 before; within run-to-run noise).
+
 ## Stage E (partial): enemies and the HUD
 
 - Enemy rifles get the same `finishWeapon` surface pass as the player's weapons.
@@ -125,7 +146,7 @@ never used.
 
 | Site · tier | Baseline | Unmeasured branch state | Now |
 | --- | --- | --- | --- |
-| Cinder Yard · desktop High | 7.9 ms · 252 draws | 20.0 ms · 534 draws | **10.2 ms · 286 draws** |
+| Cinder Yard · desktop High | 7.9 ms · 252 draws | 20.0 ms · 534 draws | **10.6 ms · 286 draws** |
 | Dustline · desktop High | 6.9 ms | 15.1 ms | ~10 ms |
 | Blacksite · desktop High | 8.4 ms | 18.3 ms | ~10.5 ms |
 | Cinder Yard · mobile touch | 7.0 ms | 8.7 ms | 8.6 ms |

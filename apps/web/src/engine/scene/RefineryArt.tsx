@@ -66,7 +66,7 @@ export function buildSiteKit(level: LevelDef): KitGeometry[] {
 export function RefineryArt({ level, mats }: { level: LevelDef; mats: Record<string, THREE.Material> }) {
   const merged = useMemo(() => mergeKit(buildSiteKit(level)), [level]);
   useEffect(() => () => { for (const g of Object.values(merged)) g?.dispose(); }, [merged]);
-  const material = (m: KitMaterial) => (m === 'dark' ? mats.frame : mats[m]) ?? mats.steel;
+  const material = (m: KitMaterial) => (m === 'dark' ? mats.frame : m === 'tank' ? mats.tankKit ?? mats.tank : mats[m]) ?? mats.steel;
   return (
     <group>
       {(Object.entries(merged) as [KitMaterial, THREE.BufferGeometry][]).map(([m, g]) => (

@@ -361,6 +361,11 @@ export function LevelArt({ level, minimal = false, colourOnly = false, lit = tru
       tank: level.id === 'cinder_yard'
         ? tri(painted(concrete), { color: '#a29e94', roughness: 0.6, metalness: 0.35 }, 4.5)
         : tri(plate, { color: '#c8c3b8', roughness: 0.45, metalness: 0.6 }, 2.4),
+      // The kit's tanks and columns carry baked weathering (vertex colours from
+      // refineryKit's mergeKit): the same paint, grimed toward the base.
+      tankKit: level.id === 'cinder_yard'
+        ? tri(painted(concrete), { color: '#969187', roughness: 0.62, metalness: 0.25, vertexColors: true }, 4.5)
+        : tri(plate, { color: '#c8c3b8', roughness: 0.45, metalness: 0.6, vertexColors: true }, 2.4),
       rust: tri(plate, { color: '#7a4a32', roughness: 0.7, metalness: 0.45 }, 2.4),
       pipe: new THREE.MeshStandardMaterial({ color: '#6b6e72', roughness: 0.45, metalness: 0.7 }),
       hazard: new THREE.MeshStandardMaterial({ color: '#c9a227', roughness: 0.6 }),

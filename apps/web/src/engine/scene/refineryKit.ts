@@ -205,7 +205,8 @@ export function buildColumn(c: ColumnSpec): KitGeometry {
   const r = c.size / 2 - 0.1, h = c.height, { x, z } = c;
   // Skirt, with a flared base ring and an access opening (a dark recess).
   cyl(out, 'concrete', r + 0.08, r + 0.1, 0.3, x, 0.15, z, 32);
-  cyl(out, 'steel', r + 0.02, r + 0.08, 2.4, x, 1.5, z, 32);
+  // The skirt: fireproofed in concrete, as real column skirts are (tread plate here read as floor plating).
+  cyl(out, 'concrete', r + 0.02, r + 0.08, 2.4, x, 1.5, z, 32);
   ring(out, 'steel', r + 0.12, 0.05, x, 2.7, z, 32);
   box(out, 'dark', 0.9, 1.6, 0.1, x + (r + 0.25) * Math.SQRT1_2, 1.1, z + (r + 0.25) * Math.SQRT1_2, -Math.PI / 4);
   // Vessel with heads.
@@ -400,9 +401,33 @@ export function mergeKit(parts: KitGeometry[]): Partial<Record<KitMaterial, THRE
     });
     const merged = mergeGeometries(flat, false);
     flat.forEach((g) => g.dispose());
+    if (merged && m === 'tank') weather(merged);
     if (merged) { merged.computeBoundingSphere(); out[m] = merged; }
   }
   return out;
+}
+
+/** Grime colour at the base of a painted shell, and the height over which it fades. */
+const GRIME: [number, number, number] = [0.5, 0.43, 0.35];
+const GRIME_FADE = 11;
+
+/**
+ * Baked weathering for painted shells (tanks, column shells, roofs), as vertex
+ * colours multiplied into the paint: dirt and rust bleed toward the base, fading out
+ * by GRIME_FADE metres, uneven around the shell so the gradient between a shell's
+ * bottom and top vertices draws as faint vertical streaks. Free at draw time.
+ */
+export function weather(g: THREE.BufferGeometry): void {
+  const p = g.attributes.position as THREE.BufferAttribute;
+  const c = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    // A stable per-position hash: shared vertices (non-indexed copies) agree.
+    const h = Math.abs(Math.sin(Math.round(x * 7) * 12.9898 + Math.round(z * 7) * 78.233) * 43758.5453) % 1;
+    const dirt = Math.min(1, Math.max(0, 1 - y / GRIME_FADE)) * (0.7 + 0.3 * h);
+    for (let k = 0; k < 3; k++) c[i * 3 + k] = 1 - (1 - GRIME[k]) * dirt;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(c, 3));
 }
 
 /** Triangle count of a kit geometry set (for budgets and tests). */

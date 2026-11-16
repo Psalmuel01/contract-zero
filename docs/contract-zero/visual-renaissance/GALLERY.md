@@ -10,8 +10,8 @@ Views per site: `start` (the spawn), `entry-back` (looking back at the way in),
 
 | Pair | What to look at |
 | --- | --- |
-| `cinder-yard-day-start` | Tanks with shell courses, girders and stair towers instead of plain cylinders; the tracked, ragged-edged road laid into the ground; the red-dot carbine. |
-| `cinder-yard-day-push` | The processing deck: catwalk treads, column platforms, plate-relief tank paint, contact pads under the racks. |
+| `cinder-yard-day-start` | Tanks with shell courses, girders and stair towers instead of plain cylinders, weathered toward the base so they hold against a bright sky; the tracked, ragged-edged road laid into the ground; the red-dot carbine. |
+| `cinder-yard-day-push` | The processing deck: catwalk treads, column platforms on concrete-fireproofed skirts, weathered column shells, contact pads under the racks. |
 | `cinder-yard-dusk-cargo-side` | The dusk key swung warm with quieter ambient; enemies holding finished rifles. |
 | `cinder-yard-night-push` | Night held readable by the practicals; the flare derrick against the sky. |
 | `dustline-depot-day-start` | SMAA on the container edges; the road blend; contact pads under trucks and containers. |
