@@ -19,3 +19,20 @@ Views per site: `start` (the spawn), `entry-back` (looking back at the way in),
 
 Weapon states (hip, ADS, reload, wall-press, Low) are captured by
 `probe-viewmodel.mjs`; the Stage A pair sits in `gallery/` from the hero-pass commit.
+
+## Showcase
+
+Composed frames, not like-for-like comparisons. The carbine is rendered on `/dev/carbine`
+(the player's own first-person model and finish, in a studio light); the site frames were
+picked from a scouted ring of 8 directions at each site's key points, at the hour that
+suits it, HUD hidden.
+
+| Frame | What it shows |
+| --- | --- |
+| `showcase/carbine-three-quarter`, `-side`, `-muzzle`, `-top` | The service carbine: red-dot sight, railed receiver, ribbed magazine, baked edge wear. |
+| `showcase/hero-cinder-yard-dusk-tank-farm` | The tank farm at dusk: shell courses, wind girders, stair towers, weathered paint, steam off the rack. |
+| `showcase/hero-cinder-yard-dusk-columns` | Fractionation columns framing the plant gate. |
+| `showcase/hero-blacksite-night-corridor` | The serviced corridor (cable trays, conduit, floodlights) receding toward the vault. |
+| `showcase/hero-blacksite-night-vault` | The B-7 vault facade under its own lights. |
+| `showcase/hero-dustline-depot-dusk-towers` | Dustline's watchtower and water tower at dusk. |
+| `showcase/hero-dustline-depot-dusk-warehouse` | The munitions warehouse and long dusk shadows. |

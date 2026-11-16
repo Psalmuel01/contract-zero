@@ -162,6 +162,9 @@ machines down, and the Low/touch tiers keep the primitive stand-ins.
 
 ## Remaining limitations
 
+- Some Blacksite light panels blow out to flat white rectangles at night (visible in the
+  showcase scouting); the emissive panels need a softer intensity or a texture.
+
 - Stage D is a detail pass, not a re-layout: Dustline and Blacksite keep their
   geometry; the sand drifts are subtle at gameplay distance.
 - Enemy animation set is unchanged (Mixamo locomotion; no new hit-reaction blending).
