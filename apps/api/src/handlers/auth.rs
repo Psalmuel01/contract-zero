@@ -81,6 +81,7 @@ pub async fn config(state: web::Data<AppState>) -> HttpResponse {
         "controller": a.controller,
         "wallet": { "message": a.signin_message(), "recipient": a.recipient },
         "privy": a.privy_app_id.as_ref().map(|id| json!({ "app_id": id })),
+        "float_floor_yocto": a.float_floor_yocto.to_string(),
         "dev_login": a.dev_login && state.near.is_none(),
     }))
 }
@@ -210,6 +211,25 @@ pub async fn relay(state: web::Data<AppState>, req: HttpRequest, body: web::Json
     };
     match state.auth.relay(&s.account, &body.signed_delegate).await {
         Ok(v) => HttpResponse::Ok().json(v),
+        Err(e) => err(e),
+    }
+}
+
+/// Gas tank: refill the signed-in player's game-created account if it runs low
+/// (called before a trade). Wallet players' own accounts are never touched.
+pub async fn topup(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    if let Some(r) = limited(&state, &req) {
+        return r;
+    }
+    let s = match player(&state, &req).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if s.method != "privy" && s.method != "near_auth" {
+        return HttpResponse::Ok().json(json!({ "refilled": null }));
+    }
+    match state.auth.top_up(state.world.db(), &s.account).await {
+        Ok(tx) => HttpResponse::Ok().json(json!({ "refilled": tx })),
         Err(e) => err(e),
     }
 }

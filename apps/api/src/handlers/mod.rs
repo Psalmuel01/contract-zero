@@ -72,6 +72,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/auth/session", web::get().to(auth::session))
         .route("/auth/logout", web::post().to(auth::logout))
         .route("/relay/delegate", web::post().to(auth::relay))
+        .route("/relay/topup", web::post().to(auth::topup))
         .route("/relay/near-auth-sign", web::post().to(auth::near_auth_sign))
         .route("/intents", web::get().to(intents::overview))
         .route("/intents/quote", web::post().to(intents::quote))

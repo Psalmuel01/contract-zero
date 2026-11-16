@@ -134,6 +134,11 @@ pub struct AuthService {
     /// published per app; no Privy secret is needed or held.
     pub privy_app_id: Option<String>,
     privy_jwks: Mutex<Option<(Instant, HashMap<String, (String, String)>)>>,
+    /// Gas tank: a game-created account is refilled to `sponsor_yocto` when its
+    /// spendable NEAR falls below this, at most `topups_per_day` times a day.
+    pub float_floor_yocto: u128,
+    pub topups_per_day: i64,
+    topup_lock: Mutex<()>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -190,6 +195,10 @@ impl AuthService {
             jwks: Mutex::new(None),
             privy_app_id: std::env::var("PRIVY_APP_ID").ok().filter(|v| !v.trim().is_empty()),
             privy_jwks: Mutex::new(None),
+            // 0.02 NEAR: about two worst-case trade gas reservations.
+            float_floor_yocto: std::env::var("AUTH_FLOAT_FLOOR_YOCTO").ok().and_then(|v| v.parse().ok()).unwrap_or(20_000_000_000_000_000_000_000),
+            topups_per_day: std::env::var("AUTH_TOPUPS_PER_DAY").ok().and_then(|v| v.parse().ok()).unwrap_or(3),
+            topup_lock: Mutex::new(()),
         })
     }
 
@@ -220,6 +229,52 @@ impl AuthService {
             return Ok(false);
         }
         Err(AuthError::Unavailable(format!("view_account: {}", r["error"])))
+    }
+
+    /// (balance, storage bytes) of an account, or None if it doesn't exist.
+    async fn balance(&self, account: &str) -> Result<Option<(u128, u64)>, AuthError> {
+        let r = self.rpc("query", json!({ "request_type": "view_account", "finality": "final", "account_id": account })).await?;
+        if let Some(a) = r["result"]["amount"].as_str() {
+            let amount = a.parse::<u128>().map_err(|_| AuthError::Unavailable("view_account: bad amount".into()))?;
+            return Ok(Some((amount, r["result"]["storage_usage"].as_u64().unwrap_or(0))));
+        }
+        if r["error"]["cause"]["name"].as_str() == Some("UNKNOWN_ACCOUNT") {
+            return Ok(None);
+        }
+        Err(AuthError::Unavailable(format!("view_account: {}", r["error"])))
+    }
+
+    /// Gas tank. Refill an account the game created (email or NEAR Auth; never a
+    /// wallet player's own account) when its spendable NEAR runs low, so the player
+    /// never sees gas. Bounded per account per day; every refill is recorded.
+    /// Returns the transfer's hash, or None when no refill was needed or allowed.
+    pub async fn top_up(&self, db: &PgPool, account: &str) -> Result<Option<String>, AuthError> {
+        let ours: Option<(String,)> = sqlx::query_as("SELECT account FROM auth_identities WHERE account = $1").bind(account).fetch_optional(db).await?;
+        if ours.is_none() || self.relayer.is_none() {
+            return Ok(None);
+        }
+        let _one_at_a_time = self.topup_lock.lock().await;
+        let Some((amount, storage)) = self.balance(account).await? else { return Ok(None) };
+        let Some(add) = top_up_amount(amount, storage, self.float_floor_yocto, self.sponsor_yocto) else { return Ok(None) };
+        let (today,): (i64,) = sqlx::query_as("SELECT count(*) FROM auth_topups WHERE account = $1 AND created_at > now() - interval '1 day'").bind(account).fetch_one(db).await?;
+        if today >= self.topups_per_day {
+            tracing::warn!(account, "gas tank: daily refill limit reached");
+            return Ok(None);
+        }
+        let (hash, out) = self.submit(account, vec![Action::Transfer(near_api::types::transaction::actions::TransferAction { deposit: NearToken::from_yoctonear(add) })]).await?;
+        if out["status"].get("SuccessValue").is_none() {
+            return Err(AuthError::Unavailable(format!("refilling the account failed: {}", out["status"])));
+        }
+        sqlx::query("INSERT INTO auth_topups (account, amount_yocto, tx) VALUES ($1, $2, $3)").bind(account).bind(add.to_string()).bind(&hash).execute(db).await?;
+        tracing::info!(account, tx = %hash, "gas tank: refilled");
+        Ok(Some(hash))
+    }
+
+    /// Refill on sign-in without ever failing the sign-in over it.
+    async fn top_up_quietly(&self, db: &PgPool, account: &str) {
+        if let Err(e) = self.top_up(db, account).await {
+            tracing::warn!(account, "gas tank refill skipped: {e}");
+        }
     }
 
     async fn view(&self, contract: &str, method: &str, args: Value) -> Result<Value, AuthError> {
@@ -345,6 +400,9 @@ impl AuthService {
         if self.key_permission(&account, &public_key).await? != Some(true) {
             return Err(AuthError::Unavailable("the account is not controlled by the derived key yet; try again shortly".into()));
         }
+        if sponsor_tx.is_none() {
+            self.top_up_quietly(db, &account).await;
+        }
         Ok((account, provider, c.sub, public_key, label))
     }
 
@@ -410,7 +468,7 @@ impl AuthService {
         let known: Option<(String,)> = sqlx::query_as("SELECT account FROM auth_identities WHERE subject = $1").bind(&user).fetch_optional(db).await?;
         match known {
             Some((a,)) if a != account => return Err(denied("this email is already linked to a different game account")),
-            Some(_) => {}
+            Some(_) => self.top_up_quietly(db, &account).await,
             None => {
                 let mut sponsor_tx = None;
                 if !self.account_exists(&account).await? {
@@ -665,6 +723,16 @@ fn parse_ed25519(pk: &str) -> Result<VerifyingKey, AuthError> {
     VerifyingKey::from_bytes(&arr).map_err(|_| AuthError::Bad("invalid ed25519 key".into()))
 }
 
+/// 1 NEAR = 10^24 yocto; storage costs 10^19 yocto per byte (locked, not spendable).
+const STORAGE_YOCTO_PER_BYTE: u128 = 10_000_000_000_000_000_000;
+
+/// How much to send so an account's spendable NEAR is back at `target`, or None if
+/// it is still at or above `floor`.
+pub fn top_up_amount(amount: u128, storage_bytes: u64, floor: u128, target: u128) -> Option<u128> {
+    let spendable = amount.saturating_sub(storage_bytes as u128 * STORAGE_YOCTO_PER_BYTE);
+    (spendable < floor).then(|| target.saturating_sub(spendable)).filter(|a| *a > 0)
+}
+
 /// A Privy JWKS document → kid → (x, y) for its P-256 signing keys.
 pub fn privy_keys(v: &Value) -> HashMap<String, (String, String)> {
     v["keys"]
@@ -735,6 +803,20 @@ fn nep366_hash(d: &DelegateAction) -> [u8; 32] {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
+
+    #[test]
+    fn the_gas_tank_refills_only_when_low_and_only_to_the_target() {
+        const N: u128 = 1_000_000_000_000_000_000_000_000;
+        let (floor, target) = (N / 50, N / 10); // 0.02, 0.1
+        // 0.1 NEAR with 182 bytes stored (0.00182 locked): spendable ~0.098, no refill.
+        assert_eq!(top_up_amount(N / 10, 182, floor, target), None);
+        // 0.015 spendable: refill by 0.085.
+        assert_eq!(top_up_amount(15 * N / 1000, 0, floor, target), Some(85 * N / 1000));
+        // Storage counts against what is spendable.
+        assert_eq!(top_up_amount(N / 50 + 100 * STORAGE_YOCTO_PER_BYTE - 1, 100, floor, target), Some(target - (N / 50 - 1)));
+        // An empty account is filled to the target.
+        assert_eq!(top_up_amount(0, 0, floor, target), Some(target));
+    }
 
     #[test]
     fn privy_verification_keys_are_read_from_its_jwks_shape() {

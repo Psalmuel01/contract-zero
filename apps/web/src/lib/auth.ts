@@ -40,6 +40,8 @@ export interface AuthConfig {
   wallet: { message: string; recipient: string }
   /** Email sign-in through Privy, when the server is configured for it. */
   privy?: { app_id: string } | null
+  /** Gas tank: below this spendable balance (yocto) a game-created account is refilled. */
+  float_floor_yocto?: string
   dev_login: boolean
 }
 
@@ -145,6 +147,34 @@ async function socialRelay(session: Session, receiverId: string, action: ReturnT
   // Borsh-encoded by schema; near-api-js 7 doesn't export the SignedDelegate class at runtime.
   const sd = { delegateAction: da, signature: new Signature({ keyType: 0, data: sig }) } as unknown as Parameters<typeof encodeSignedDelegate>[0]
   return call('/relay/delegate', { method: 'POST', body: JSON.stringify({ signed_delegate: btoa(String.fromCharCode(...encodeSignedDelegate(sd))) }) })
+}
+
+// ── Gas tank ─────────────────────────────────────────────────────────────
+//
+// Accounts the game created (email, NEAR Auth) pay their own trade gas from a small
+// float the relayer funds; the player never sees NEAR. Before anything that spends
+// from it, one balance read, and a refill request only when it's low. The server
+// decides whether to refill (its own accounts only, limited per day).
+
+const STORAGE_YOCTO_PER_BYTE = 10n ** 19n
+
+/** Spendable NEAR (yocto) of an account: its balance less what storage locks. */
+export function spendable(amount: string, storageBytes: number): bigint {
+  const s = BigInt(amount) - BigInt(storageBytes) * STORAGE_YOCTO_PER_BYTE
+  return s > 0n ? s : 0n
+}
+
+async function ensureFloat(session: Session): Promise<void> {
+  if (session.method !== 'privy' && session.method !== 'near_auth') return
+  cfg = cfg ?? await auth.config()
+  const floor = BigInt(cfg.float_floor_yocto ?? '0')
+  if (floor === 0n) return
+  try {
+    const a = await provider().viewAccount({ accountId: session.account })
+    if (spendable(String(a.amount), a.storage_usage) >= floor) return
+  } catch { /* unreadable: let the server look */ }
+  // A failed refill isn't fatal here: the trade itself reports if gas is short.
+  await call('/relay/topup', { method: 'POST' }).catch(() => {})
 }
 
 // ── Email: Privy ─────────────────────────────────────────────────────────
@@ -273,6 +303,7 @@ export async function enableQuickTrade(session: Session, limits: QuickTradeLimit
   cfg = cfg ?? await auth.config()
   const world = cfg.controller
   if (!world) throw new Error('trading is off-chain here; quick trade is not needed')
+  await ensureFloat(session) // the session deposit comes from the player's account
   const key = KeyPair.fromRandom('ed25519')
   const pk = key.getPublicKey()
   // Quotes, supply orders (place, accept a proposal, cancel) and signing itself out.
@@ -331,6 +362,7 @@ export async function disableQuickTrade(session: Session): Promise<void> {
  *  with the player's own approval. Returns the transaction hash. */
 export async function acceptQuote(session: Session, call_: { receiver_id: string; method: string; args: Record<string, string>; gas: string }): Promise<{ hash: string; via: 'quick' | 'wallet' | 'social' | 'email' }> {
   const action = actions.functionCall(call_.method, call_.args, BigInt(call_.gas), 0n)
+  await ensureFloat(session) // trade gas, quick-trade key or not, comes from the account
   const key = loadSessionKey(session.account)
   if (key) {
     const acct = new Account(session.account, provider(), new KeyPairSigner(key))
