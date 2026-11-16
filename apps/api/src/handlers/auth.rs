@@ -80,6 +80,7 @@ pub async fn config(state: web::Data<AppState>) -> HttpResponse {
         "relayer": a.relayer.as_ref().map(|r| r.account.to_string()),
         "controller": a.controller,
         "wallet": { "message": a.signin_message(), "recipient": a.recipient },
+        "privy": a.privy_app_id.as_ref().map(|id| json!({ "app_id": id })),
         "dev_login": a.dev_login && state.near.is_none(),
     }))
 }
@@ -133,6 +134,33 @@ pub async fn near_auth(state: web::Data<AppState>, req: HttpRequest, body: web::
     }
     match state.auth.verify_near_auth(state.world.db(), &body.id_token).await {
         Ok((account, provider, sub, pk, label)) => signed_in(&state, &account, "near_auth", Some(&provider), Some(&sub), Some(&pk), json!({ "label": label })).await,
+        Err(e) => err(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PrivySignIn {
+    /// The player's Privy access token (proves the email login, gates sponsorship).
+    pub access_token: String,
+    /// The Privy-held NEAR key; the account is its implicit account.
+    pub public_key: String,
+    /// NEP-413 signature over the challenge, by that key.
+    pub signature: String,
+    pub nonce: String,
+}
+
+/// Email sign-in through Privy: the same NEP-413 proof as a wallet, for the implicit
+/// account of the player's Privy-held key, sponsored on first sign-in.
+pub async fn privy(state: web::Data<AppState>, req: HttpRequest, body: web::Json<PrivySignIn>) -> HttpResponse {
+    if let Some(r) = limited(&state, &req) {
+        return r;
+    }
+    let b = body.into_inner();
+    let Ok(nonce) = base64::engine::general_purpose::STANDARD.decode(&b.nonce) else {
+        return HttpResponse::BadRequest().json(json!({ "error": "nonce must be base64" }));
+    };
+    match state.auth.verify_privy(state.world.db(), &b.access_token, &b.public_key, &b.signature, &nonce).await {
+        Ok((account, user)) => signed_in(&state, &account, "privy", Some("email"), Some(&user), Some(&b.public_key), json!({})).await,
         Err(e) => err(e),
     }
 }

@@ -67,6 +67,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         .route("/auth/challenge", web::post().to(auth::challenge))
         .route("/auth/wallet", web::post().to(auth::wallet))
         .route("/auth/near-auth", web::post().to(auth::near_auth))
+        .route("/auth/privy", web::post().to(auth::privy))
         .route("/auth/dev", web::post().to(auth::dev))
         .route("/auth/session", web::get().to(auth::session))
         .route("/auth/logout", web::post().to(auth::logout))

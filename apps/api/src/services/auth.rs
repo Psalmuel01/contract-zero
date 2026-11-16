@@ -130,6 +130,10 @@ pub struct AuthService {
     pub dev_login: bool,
     pub cookie_secure: bool,
     jwks: Mutex<Option<(Instant, HashMap<String, (String, String)>)>>,
+    /// Privy (email sign-in): the app id, public. Its ES256 verification keys are
+    /// published per app; no Privy secret is needed or held.
+    pub privy_app_id: Option<String>,
+    privy_jwks: Mutex<Option<(Instant, HashMap<String, (String, String)>)>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -184,6 +188,8 @@ impl AuthService {
             // Production forces Secure; the web app and the API are separate sites there.
             cookie_secure: std::env::var("AUTH_COOKIE_SECURE").as_deref() == Ok("1") || crate::is_production(),
             jwks: Mutex::new(None),
+            privy_app_id: std::env::var("PRIVY_APP_ID").ok().filter(|v| !v.trim().is_empty()),
+            privy_jwks: Mutex::new(None),
         })
     }
 
@@ -235,18 +241,24 @@ impl AuthService {
         Ok(nonce)
     }
 
-    /// Verify a NEP-413 sign-in and consume its nonce. Returns the proven account.
-    pub async fn verify_wallet(&self, db: &PgPool, account: &str, public_key: &str, signature_b64: &str, nonce: &[u8]) -> Result<(), AuthError> {
+    /// The NEP-413 signature over our sign-in message and a challenge nonce, which it
+    /// consumes (single use). Proves only that the caller holds `public_key`.
+    async fn verify_challenge(&self, db: &PgPool, public_key: &str, signature_b64: &str, nonce: &[u8]) -> Result<(), AuthError> {
         let nonce: [u8; 32] = nonce.try_into().map_err(|_| AuthError::Bad("nonce must be 32 bytes".into()))?;
         let pk = parse_ed25519(public_key)?;
         let sig = decode_signature(signature_b64)?;
         let hash = nep413_hash(&self.signin_message(), &nonce, &self.recipient, None);
         pk.verify(&hash, &sig).map_err(|_| denied("signature does not match"))?;
-        // Single use: the nonce must be ours, unexpired and unused.
         let n = sqlx::query("UPDATE auth_challenges SET used_at = now() WHERE nonce = $1 AND used_at IS NULL AND expires_at > now()").bind(hex::encode(nonce)).execute(db).await?.rows_affected();
         if n != 1 {
             return Err(denied("unknown, expired or already used sign-in challenge"));
         }
+        Ok(())
+    }
+
+    /// Verify a NEP-413 sign-in and consume its nonce. Returns the proven account.
+    pub async fn verify_wallet(&self, db: &PgPool, account: &str, public_key: &str, signature_b64: &str, nonce: &[u8]) -> Result<(), AuthError> {
+        self.verify_challenge(db, public_key, signature_b64, nonce).await?;
         // The key must control the account: full access, not a scoped key.
         match self.key_permission(account, public_key).await? {
             Some(true) => Ok(()),
@@ -334,6 +346,91 @@ impl AuthService {
             return Err(AuthError::Unavailable("the account is not controlled by the derived key yet; try again shortly".into()));
         }
         Ok((account, provider, c.sub, public_key, label))
+    }
+
+    // ── Privy: email sign-in, a Privy-held NEAR key ─────────────────────────
+    //
+    // Privy authenticates the email and holds the player's ed25519 key; it proves
+    // nothing to us by itself. The account is proven exactly like a wallet's: a
+    // NEP-413 signature over our single-use challenge, by the key whose implicit
+    // account is the player's. The Privy access token only gates sponsorship (one
+    // funded account per Privy user) and pins that user to that one account.
+
+    async fn privy_key(&self, app: &str, kid: &str) -> Result<(String, String), AuthError> {
+        {
+            let g = self.privy_jwks.lock().await;
+            if let Some((at, keys)) = g.as_ref() {
+                if at.elapsed() < Duration::from_secs(3600) {
+                    if let Some(k) = keys.get(kid) {
+                        return Ok(k.clone());
+                    }
+                }
+            }
+        }
+        let url = format!("https://auth.privy.io/api/v1/apps/{app}/jwks.json");
+        let v: Value = self.http.get(&url).send().await.map_err(|e| AuthError::Unavailable(e.to_string()))?.json().await.map_err(|e| AuthError::Unavailable(e.to_string()))?;
+        let keys = privy_keys(&v);
+        let found = keys.get(kid).cloned();
+        *self.privy_jwks.lock().await = Some((Instant::now(), keys));
+        found.ok_or_else(|| denied("Privy token signed by an unknown key"))
+    }
+
+    /// The Privy user id (`did:privy:…`) of a valid access token for our app.
+    async fn privy_user(&self, access_token: &str) -> Result<String, AuthError> {
+        use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+        let app = self.privy_app_id.as_deref().ok_or_else(|| AuthError::Unavailable("email sign-in is not configured on this server".into()))?;
+        let header = decode_header(access_token).map_err(|_| AuthError::Bad("malformed Privy token".into()))?;
+        if header.alg != Algorithm::ES256 {
+            return Err(denied("unexpected Privy token algorithm"));
+        }
+        let kid = header.kid.ok_or_else(|| denied("Privy token has no key id"))?;
+        let (x, y) = self.privy_key(app, &kid).await?;
+        let key = DecodingKey::from_ec_components(&x, &y).map_err(|_| AuthError::Unavailable("bad Privy verification key".into()))?;
+        let mut v = Validation::new(Algorithm::ES256);
+        v.set_audience(&[app]);
+        v.set_issuer(&["privy.io"]);
+        v.leeway = 30;
+        #[derive(Deserialize)]
+        struct C {
+            sub: String,
+        }
+        let c = decode::<C>(access_token, &key, &v).map_err(|e| denied(format!("Privy token rejected: {e}")))?.claims;
+        if !c.sub.starts_with("did:privy:") {
+            return Err(denied("not a Privy user token"));
+        }
+        Ok(c.sub)
+    }
+
+    /// Email sign-in through Privy. Returns (account, Privy user id).
+    pub async fn verify_privy(&self, db: &PgPool, access_token: &str, public_key: &str, signature_b64: &str, nonce: &[u8]) -> Result<(String, String), AuthError> {
+        let user = self.privy_user(access_token).await?;
+        self.verify_challenge(db, public_key, signature_b64, nonce).await?;
+        let account = implicit_account(public_key)?;
+        // One Privy user, one account, forever: a second key for the same user is refused.
+        let known: Option<(String,)> = sqlx::query_as("SELECT account FROM auth_identities WHERE subject = $1").bind(&user).fetch_optional(db).await?;
+        match known {
+            Some((a,)) if a != account => return Err(denied("this email is already linked to a different game account")),
+            Some(_) => {}
+            None => {
+                let mut sponsor_tx = None;
+                if !self.account_exists(&account).await? {
+                    sponsor_tx = Some(self.sponsor(&account).await?);
+                }
+                sqlx::query("INSERT INTO auth_identities (subject, provider, public_key, account, sponsor_tx) VALUES ($1, 'privy', $2, $3, $4) ON CONFLICT (subject) DO NOTHING")
+                    .bind(&user)
+                    .bind(public_key)
+                    .bind(&account)
+                    .bind(&sponsor_tx)
+                    .execute(db)
+                    .await?;
+            }
+        }
+        // The chain must agree the key controls the account (it may have been rotated).
+        match self.key_permission(&account, public_key).await? {
+            Some(true) => Ok((account, user)),
+            Some(false) => Err(denied("that key is a limited key of the account")),
+            None => Err(AuthError::Unavailable("the account is not on chain yet; try again shortly".into())),
+        }
     }
 
     // ── sessions ─────────────────────────────────────────────────────────────
@@ -568,6 +665,17 @@ fn parse_ed25519(pk: &str) -> Result<VerifyingKey, AuthError> {
     VerifyingKey::from_bytes(&arr).map_err(|_| AuthError::Bad("invalid ed25519 key".into()))
 }
 
+/// A Privy JWKS document → kid → (x, y) for its P-256 signing keys.
+pub fn privy_keys(v: &Value) -> HashMap<String, (String, String)> {
+    v["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|k| k["kty"] == "EC" && k["crv"] == "P-256")
+        .filter_map(|k| Some((k["kid"].as_str()?.to_string(), (k["x"].as_str()?.to_string(), k["y"].as_str()?.to_string()))))
+        .collect()
+}
+
 /// The implicit account id of an ed25519 key: the hex of its 32 bytes.
 pub fn implicit_account(pk: &str) -> Result<String, AuthError> {
     Ok(hex::encode(parse_ed25519(pk)?.to_bytes()))
@@ -627,6 +735,19 @@ fn nep366_hash(d: &DelegateAction) -> [u8; 32] {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer as _, SigningKey};
+
+    #[test]
+    fn privy_verification_keys_are_read_from_its_jwks_shape() {
+        // The shape auth.privy.io serves for an app (2026-11-16): P-256 keys by kid.
+        let v = json!({ "keys": [
+            { "kty": "EC", "crv": "P-256", "kid": "a", "x": "xa", "y": "ya", "alg": "ES256", "use": "sig" },
+            { "kty": "RSA", "kid": "r", "n": "n", "e": "AQAB" },
+            { "kty": "EC", "crv": "P-384", "kid": "b", "x": "xb", "y": "yb" },
+        ]});
+        let k = privy_keys(&v);
+        assert_eq!(k.len(), 1);
+        assert_eq!(k["a"], ("xa".to_string(), "ya".to_string()));
+    }
 
     #[test]
     fn the_web_clients_quick_trade_key_is_one_the_relayer_accepts() {

@@ -5,6 +5,9 @@
 //  - Google / email / passkey: NEAR Auth. Auth0 login; NEAR's MPC network controls a
 //    key derived from the identity; the player's account is that key's implicit
 //    account (sponsored on first sign-in). The server verifies the identity token.
+//  - Email: Privy holds the player's NEAR key (lib/privy.tsx); the key signs the same
+//    NEP-413 challenge a wallet does, for its implicit account (sponsored on first
+//    sign-in). Privy's own login token only gates that sponsorship.
 //  - Existing NEAR users: NEAR Connect wallet + a NEP-413 signed sign-in message.
 //
 // The NEAR Auth steps mirror @fast-auth-near/javascript-provider 1.4.1 (Auth0 popup
@@ -23,7 +26,7 @@ const provider = () => new JsonRpcProvider({ url: RPC })
 
 export interface Session {
   account: string
-  method: 'wallet' | 'near_auth' | 'dev'
+  method: 'wallet' | 'near_auth' | 'privy' | 'dev'
   provider: 'google' | 'apple' | 'email' | 'wallet' | 'dev' | null
   subject: string | null
   public_key: string | null
@@ -35,6 +38,8 @@ export interface AuthConfig {
   relayer: string | null
   controller: string | null
   wallet: { message: string; recipient: string }
+  /** Email sign-in through Privy, when the server is configured for it. */
+  privy?: { app_id: string } | null
   dev_login: boolean
 }
 
@@ -55,6 +60,7 @@ export const auth = {
   logout: async () => {
     await call('/auth/logout', { method: 'POST' })
     try { await (await auth0())?.logout({ openUrl: false }) } catch { /* not signed in with NEAR Auth */ }
+    if (privyLoaded) { try { await (await import('@/lib/privy')).logout() } catch { /* not signed in with email */ } }
     clearSessionKey()
   },
   dev: (account_id: string) => call<Session>('/auth/dev', { method: 'POST', body: JSON.stringify({ account_id }) }),
@@ -141,6 +147,64 @@ async function socialRelay(session: Session, receiverId: string, action: ReturnT
   return call('/relay/delegate', { method: 'POST', body: JSON.stringify({ signed_delegate: btoa(String.fromCharCode(...encodeSignedDelegate(sd))) }) })
 }
 
+// ── Email: Privy ─────────────────────────────────────────────────────────
+
+let privyLoaded = false
+
+async function privy() {
+  cfg = cfg ?? await auth.config()
+  if (!cfg.privy?.app_id) throw new Error('Email sign-in is not available on this server.')
+  const p = await import('@/lib/privy')
+  privyLoaded = true
+  await p.start(cfg.privy.app_id)
+  return p
+}
+
+/** Is email sign-in offered here? */
+export async function emailAvailable(): Promise<boolean> {
+  cfg = cfg ?? await auth.config()
+  return !!cfg.privy?.app_id
+}
+
+/** Email sign-in: Privy's email code, then the Privy-held key signs our challenge. */
+export async function signInEmail(): Promise<Session> {
+  const p = await privy()
+  const user = await p.login()
+  const account = await p.nearAccount(user)
+  const ch = await call<{ nonce: string; message: string; recipient: string }>('/auth/challenge', { method: 'POST' })
+  const nonce = Uint8Array.from(atob(ch.nonce), (c) => c.charCodeAt(0))
+  const signed = await new p.PrivySigner(account).signNep413Message(account, { message: ch.message, recipient: ch.recipient, nonce })
+  await call('/auth/privy', {
+    method: 'POST',
+    body: JSON.stringify({ access_token: await p.accessToken(), public_key: signed.publicKey.toString(), signature: btoa(String.fromCharCode(...signed.signature)), nonce: ch.nonce }),
+  })
+  return (await auth.session())!
+}
+
+/** An email player's account, signing with their Privy-held key. */
+async function privyAccount(session: Session): Promise<Account> {
+  const p = await privy()
+  return new Account(session.account, provider(), new p.PrivySigner(session.account))
+}
+
+async function relaySigned(acct: Account, receiverId: string, action: ReturnType<typeof actions.functionCall>): Promise<unknown> {
+  const { signedDelegate } = await acct.createSignedMetaTransaction({ receiverId, actions: [action], blockHeightTtl: 120 })
+  return call('/relay/delegate', { method: 'POST', body: JSON.stringify({ signed_delegate: btoa(String.fromCharCode(...encodeSignedDelegate(signedDelegate))) }) })
+}
+
+/** Send a trade signed by `acct` and turn an on-chain refusal into a player-facing reason. */
+async function sendTrade(acct: Account, receiverId: string, action: ReturnType<typeof actions.functionCall>, quick: boolean): Promise<string> {
+  const r = await acct.signAndSendTransaction({ receiverId, actions: [action], waitUntil: 'FINAL', throwOnFailure: false })
+  const fail = (r.status as { Failure?: unknown }).Failure ?? r.receipts_outcome.map((x) => (x.outcome.status as { Failure?: unknown }).Failure).find(Boolean)
+  const why = JSON.stringify(fail)
+  if (fail) {
+    if (quick && /MethodNameMismatch/.test(why)) throw new Error('Your quick-trade key predates supply orders. Turn quick trade off and on again in the Exchange.')
+    if (quick && /session/.test(why)) throw new Error('Quick trade limit reached or expired. Confirm this trade yourself, or renew quick trade.')
+    throw new Error(`trade refused: ${why}`)
+  }
+  return r.transaction.hash
+}
+
 // ── Existing NEAR users: wallet + NEP-413 ──────────────────────────────────
 
 export async function signInWallet(): Promise<Session> {
@@ -204,7 +268,7 @@ export function sessionDead(s: ChainSession | null): boolean {
 export interface QuickTradeLimits { credits: number; units: number; hours: number }
 
 /** Open quick trade: add the scoped key and register its budgets, with the player's
- *  own authority (wallet approval, or NEAR Auth approvals). */
+ *  own authority (wallet approval, NEAR Auth approvals, or the email player's key). */
 export async function enableQuickTrade(session: Session, limits: QuickTradeLimits): Promise<void> {
   cfg = cfg ?? await auth.config()
   const world = cfg.controller
@@ -217,6 +281,11 @@ export async function enableQuickTrade(session: Session, limits: QuickTradeLimit
   if (session.method === 'wallet') {
     const { signTransactions } = await import('@/lib/wallet')
     await signTransactions([{ receiverId: session.account, actions: [addKey] }, { receiverId: world, actions: [register] }])
+  } else if (session.method === 'privy') {
+    // Signed with the Privy-held key; the relayer pays the gas for both.
+    const acct = await privyAccount(session)
+    await relaySigned(acct, session.account, addKey)
+    await relaySigned(acct, world, register)
   } else if (session.method === 'near_auth') {
     // Two approvals; the relayer pays the gas for both.
     await socialRelay(session, session.account, addKey)
@@ -260,17 +329,15 @@ export async function disableQuickTrade(session: Session): Promise<void> {
 
 /** Accept a quote: with the quick-trade key if one is open (no prompt), otherwise
  *  with the player's own approval. Returns the transaction hash. */
-export async function acceptQuote(session: Session, call_: { receiver_id: string; method: string; args: Record<string, string>; gas: string }): Promise<{ hash: string; via: 'quick' | 'wallet' | 'social' }> {
+export async function acceptQuote(session: Session, call_: { receiver_id: string; method: string; args: Record<string, string>; gas: string }): Promise<{ hash: string; via: 'quick' | 'wallet' | 'social' | 'email' }> {
   const action = actions.functionCall(call_.method, call_.args, BigInt(call_.gas), 0n)
   const key = loadSessionKey(session.account)
   if (key) {
     const acct = new Account(session.account, provider(), new KeyPairSigner(key))
-    const r = await acct.signAndSendTransaction({ receiverId: call_.receiver_id, actions: [action], waitUntil: 'FINAL', throwOnFailure: false })
-    const fail = (r.status as { Failure?: unknown }).Failure ?? r.receipts_outcome.map((x) => (x.outcome.status as { Failure?: unknown }).Failure).find(Boolean)
-    const why = JSON.stringify(fail)
-    if (fail) throw new Error(/MethodNameMismatch/.test(why) ? 'Your quick-trade key predates supply orders. Turn quick trade off and on again in the Exchange.' : /session/.test(why) ? 'Quick trade limit reached or expired. Confirm this trade yourself, or renew quick trade.' : `trade refused: ${why}`)
-    return { hash: r.transaction.hash, via: 'quick' }
+    return { hash: await sendTrade(acct, call_.receiver_id, action, true), via: 'quick' }
   }
+  // An email player's own key; they pay the (small) gas from the sponsored float.
+  if (session.method === 'privy') return { hash: await sendTrade(await privyAccount(session), call_.receiver_id, action, false), via: 'email' }
   if (session.method === 'near_auth') return { hash: await socialSendTx(session, call_.receiver_id, action), via: 'social' }
   const { signCall } = await import('@/lib/wallet')
   const { hash, result } = await signCall({ ...call_, deposit: '0' })
