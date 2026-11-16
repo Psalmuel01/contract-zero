@@ -151,9 +151,9 @@ draws (10.2 ms / 286 before; within run-to-run noise).
 | Site · tier | Baseline | Unmeasured branch state | Now |
 | --- | --- | --- | --- |
 | Cinder Yard · desktop High | 7.9 ms · 252 draws | 20.0 ms · 534 draws | **10.6 ms · 286 draws** |
-| Dustline · desktop High | 6.9 ms | 15.1 ms | ~10 ms |
-| Blacksite · desktop High | 8.4 ms | 18.3 ms | ~10.5 ms |
-| Cinder Yard · mobile touch | 7.0 ms | 8.7 ms | 8.6 ms |
+| Dustline · desktop High | 6.9 ms | 15.1 ms | 11.0 ms · 221 draws |
+| Blacksite · desktop High | 8.4 ms | 18.3 ms | 9.2 ms · 250 draws |
+| Cinder Yard · mobile touch | 7.0 ms | 8.7 ms | 8.7 ms |
 | All sites · desktop Low | 5–6.5 ms | unchanged | unchanged (kit and pads don't mount on Low) |
 
 The ~2 ms over baseline on High buys SMAA, the whole refinery kit, two more
