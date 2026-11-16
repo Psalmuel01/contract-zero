@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Panel, Shell } from '@/components/ui/Shell'
-import { auth, signInSocial, signInWallet, socialBlocker } from '@/lib/auth'
+import { auth, signInEmail, signInSocial, signInWallet, socialBlocker } from '@/lib/auth'
 import { useSession } from '@/lib/useSession'
 
 function Google() {
@@ -46,6 +46,9 @@ export default function SignIn() {
   }
 
   const social = (label: string) => run(label, signInSocial)
+  // Email through Privy when the server offers it; NEAR Auth only where it can run.
+  const email = !!cfg.data?.privy?.app_id
+  const nearAuth = !blocked
   const btn = 'flex w-full items-center justify-center gap-3 rounded-md px-4 py-3 text-sm font-semibold disabled:opacity-40'
 
   return (
@@ -54,14 +57,24 @@ export default function SignIn() {
         <Panel>
           <p className="mb-4 text-sm text-slate-400">Your account keeps what you extract and what you trade. No seed phrase, no extensions.</p>
           <div className="space-y-2">
-            <button className={`${btn} bg-white text-slate-900 hover:bg-slate-100`} disabled={!!busy || !!blocked} onClick={() => social('google')}>
-              <Google /> {busy === 'google' ? 'Opening Google…' : 'Continue with Google'}
-            </button>
-            <button className={`${btn} border border-slate-700 text-slate-200 hover:bg-slate-900`} disabled={!!busy || !!blocked} onClick={() => social('email')}>
-              {busy === 'email' ? 'Opening…' : 'Email or passkey'}
-            </button>
+            {email && (
+              <button className={`${btn} bg-white text-slate-900 hover:bg-slate-100`} disabled={!!busy} onClick={() => run('privy', signInEmail)} data-testid="signin-email">
+                {busy === 'privy' ? 'Signing in…' : 'Continue with email'}
+              </button>
+            )}
+            {(nearAuth || !email) && (
+              <button className={`${btn} ${email ? 'border border-slate-700 text-slate-200 hover:bg-slate-900' : 'bg-white text-slate-900 hover:bg-slate-100'}`} disabled={!!busy || !!blocked} onClick={() => social('google')}>
+                <Google /> {busy === 'google' ? 'Opening Google…' : 'Continue with Google'}
+              </button>
+            )}
+            {!email && (
+              <button className={`${btn} border border-slate-700 text-slate-200 hover:bg-slate-900`} disabled={!!busy || !!blocked} onClick={() => social('email')}>
+                {busy === 'email' ? 'Opening…' : 'Email or passkey'}
+              </button>
+            )}
           </div>
-          {blocked && <p className="mt-3 text-xs text-amber-400">{blocked}</p>}
+          {email && <p className="mt-3 text-xs text-slate-500">We email you a code. Your game account is created on first sign-in.</p>}
+          {blocked && !email && <p className="mt-3 text-xs text-amber-400">{blocked}</p>}
         </Panel>
 
         <div className="flex items-center gap-3 text-xs text-slate-600"><div className="h-px flex-1 bg-slate-800" />or<div className="h-px flex-1 bg-slate-800" /></div>
