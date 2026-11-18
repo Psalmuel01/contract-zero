@@ -583,6 +583,8 @@ const BLOOD_POOL = new THREE.Color('#5a0a08');
 // Ash hanging in the compound air. Warm and dim: it is lit, not emissive, and a
 // mote bright enough to notice individually reads as snow.
 const MOTE_COLOR = new THREE.Color('#cbb69a').multiplyScalar(0.9);
+/** Propellant smoke: pale, a little warm, lit by the flash it follows. */
+const MUZZLE_SMOKE = new THREE.Color('#d8d2c6');
 
 // ── The system ────────────────────────────────────────────────────────────────
 
@@ -832,6 +834,35 @@ export class ImpactFX {
    * with eight enemies in it is running a dozen of these a second. One or two
    * billboards each, no sparks, no decal.
    */
+  /**
+   * The muzzle: what leaves the barrel besides the round. A short-lived hot flash
+   * billboard at the tip, a few sparks of unburnt powder thrown forward, and a puff of
+   * smoke that drifts up and hangs. `dir` is the barrel direction. The scene draws the
+   * flash cards themselves; this is the smoke and the embers around them.
+   */
+  muzzle(point: Vec3, dir: Vec3, power = 1) {
+    const q = this.lean ? 0.6 : 1;
+    const d = norm(dir);
+    const from: Vec3 = [point[0] + d[0] * 0.04, point[1] + d[1] * 0.04, point[2] + d[2] * 0.04];
+    this.flash.emit({
+      origin: from, dir: d, spread: 0, count: 1,
+      speed: [0, 0], life: [0.04, 0.06], size: [0.22 * power, 0.34 * power],
+      color: FLASH_COLOR, alpha: 0.9, gravity: 0, drag: 1,
+    });
+    if (!this.lean) {
+      this.sparks.emit({
+        origin: from, dir: d, spread: 0.22, count: 3,
+        speed: [4, 9], life: [0.05, 0.12], size: [0.012, 0.024],
+        color: SPARK_COLOR, alpha: 0.9, gravity: -6, drag: 0.9, stretch: 0.03,
+      });
+    }
+    this.dust.emit({
+      origin: from, dir: [d[0] * 0.6, d[1] * 0.6 + 0.5, d[2] * 0.6], spread: 0.55, count: this.lean ? 1 : 2,
+      speed: [0.6, 1.4], life: [0.45, 0.9], size: [0.07, 0.12],
+      color: MUZZLE_SMOKE, alpha: 0.22 * power * q, gravity: 0.25, drag: 0.82, grow: 4, jitter: 0.02, spin: 1.2,
+    });
+  }
+
   scuff(at: Vec3, power = 1) {
     const q = this.lean ? 0.5 : 1;
     // Drifts up and slightly outward, the way disturbed dust actually behaves,

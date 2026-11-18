@@ -20,6 +20,8 @@ const palette = {
   rubber: new T.MeshStandardMaterial({ name: 'rubber', color: '#131717', metalness: 0, roughness: .91 }),
   paint: new T.MeshStandardMaterial({ name: 'powder coat', color: '#79806b', metalness: .28, roughness: .67 }),
   concrete: new T.MeshStandardMaterial({ name: 'cast concrete', color: '#aaa99e', roughness: .96 }),
+  glass: new T.MeshStandardMaterial({ name: 'optic glass', color: '#223544', metalness: .1, roughness: .05, transparent: true, opacity: .3 }),
+  reticle: new T.MeshStandardMaterial({ name: 'reticle', color: '#ff3a24', emissive: '#ff3a24', emissiveIntensity: 6, roughness: .4 }),
 }
 function bevel(w,h,d,r=.005) {
   const s=new T.Shape(), x=-w/2+r, y=-h/2+r
@@ -28,9 +30,39 @@ function bevel(w,h,d,r=.005) {
   g.translate(0,0,-d/2+r);return g
 }
 function part(g,x,y,z,rx=0,ry=0,rz=0) {g.applyMatrix4(new T.Matrix4().makeRotationFromEuler(new T.Euler(rx,ry,rz)));g.translate(x,y,z);return g.index?g.toNonIndexed():g}
+/**
+ * Bake a wear mask into the vertex colours (COLOR_0), so the runtime finish shader can
+ * wear paint off the edges without a UV layout or a texture:
+ *   r = edge: how sharply the surface turns at this vertex (chamfers and corners);
+ *   g = exposure: how much the surface faces up (dust settles, hands rub);
+ *   b = reserved (1).
+ * The mesh is welded by position AND normal, so a chamfer leaves several vertices at one
+ * point with different normals; the angle between them is the edge.
+ */
+function bakeWear(geo) {
+ const pos=geo.attributes.position, nrm=geo.attributes.normal, n=pos.count
+ const key=(i)=>`${Math.round(pos.getX(i)*1e4)},${Math.round(pos.getY(i)*1e4)},${Math.round(pos.getZ(i)*1e4)}`
+ const at=new Map()
+ for(let i=0;i<n;i++){const k=key(i);if(!at.has(k))at.set(k,[]);at.get(k).push(i)}
+ // Normalised bytes: a float colour was 12 bytes a vertex, a third of the file.
+ const col=new Uint8Array(n*3)
+ const a=new T.Vector3(),b=new T.Vector3()
+ for(let i=0;i<n;i++){
+  a.set(nrm.getX(i),nrm.getY(i),nrm.getZ(i))
+  let worst=0
+  for(const j of at.get(key(i))){if(j===i)continue;b.set(nrm.getX(j),nrm.getY(j),nrm.getZ(j));worst=Math.max(worst,Math.acos(Math.max(-1,Math.min(1,a.dot(b)))))}
+  // 20° (a soft bevel) to 75° (a hard corner), eased.
+  const t=Math.max(0,Math.min(1,(worst-20*Math.PI/180)/(55*Math.PI/180)))
+  col[i*3]=Math.round(255*t*t*(3-2*t))
+  col[i*3+1]=Math.round(255*Math.max(0,a.y))
+  col[i*3+2]=255
+ }
+ geo.setAttribute('color',new T.BufferAttribute(col,3,true))
+ return geo
+}
 function model(name) {
  const group=new T.Group();group.name=name;const buckets=new Map()
- return {group, add(mat,g,x=0,y=0,z=0,rx=0,ry=0,rz=0) {if(!buckets.has(mat))buckets.set(mat,[]);buckets.get(mat).push(part(g,x,y,z,rx,ry,rz))}, finish(){for(const [mat,parts] of buckets){const merged=mergeGeometries(parts);merged.deleteAttribute('uv');const mesh=new T.Mesh(mergeVertices(merged,1e-5),palette[mat]);mesh.name=mat;group.add(mesh)}return group}}
+ return {group, add(mat,g,x=0,y=0,z=0,rx=0,ry=0,rz=0) {if(!buckets.has(mat))buckets.set(mat,[]);buckets.get(mat).push(part(g,x,y,z,rx,ry,rz))}, finish(){for(const [mat,parts] of buckets){const merged=mergeGeometries(parts);merged.deleteAttribute('uv');const mesh=new T.Mesh(bakeWear(mergeVertices(merged,1e-5)),palette[mat]);mesh.name=mat;group.add(mesh)}return group}}
 }
 // ── Service carbine ─────────────────────────────────────────────────────────
 // Built the way the real thing reads: side PROFILES (receiver, grip, stock, magazine)
@@ -81,11 +113,35 @@ box(rifle,'alloy',.022,.01,.53,0,.05,.1,0,0,0,.0015)          // top rail
 for(let i=0;i<34;i++) box(rifle,'edge',.024,.004,.006,0,.057,-.155+i*.0155,0,0,0,.001)
 // Barrel, gas block and a slotted muzzle device, all turned.
 rifle.add('alloy',turned([[.36,0],[.36,.0105],[.37,.009],[.43,.0085],[.43,0]]),0,BORE,0)
-rifle.add('edge',turned([[.4,0],[.4,.012],[.402,.0135],[.446,.0135],[.449,.011],[.449,0]],16),0,BORE,0)
+rifle.add('edge',turned([[.4,0],[.4,.012],[.402,.0135],[.443,.0135],[.443,0]],16),0,BORE,0)
 for(let i=0;i<3;i++) box(rifle,'rubber',.029,.0035,.007,0,BORE+.006,.411+i*.011,0,0,0,.001)
 // Iron sights folded low on the rail, so they never sit in the sight picture.
 box(rifle,'alloy',.024,.012,.03,0,.066,-.13,0,0,0,.002)
 box(rifle,'alloy',.022,.012,.028,0,.066,.33,0,0,0,.002)
+// Small controls that the eye reads as mechanism: the charging handle's T latch at the
+// rear of the upper, a brass deflector behind the port, the magazine release button.
+box(rifle,'edge',.05,.008,.014,0,.038,-.182,0,0,0,.0015)
+box(rifle,'alloy',.008,.016,.016,.03,.012,-.062,0,0,0,.002)
+rifle.add('edge',new T.CylinderGeometry(.005,.005,.006,10),.027,-.012,-.03,0,0,Math.PI/2)
+// Flash hider crown: a chamfered ring at the very tip.
+rifle.add('edge',turned([[.443,0],[.443,.0135],[.449,.0125],[.452,.009],[.452,0]],16),0,BORE,0)
+// A compact red dot on the rail, over the receiver: a chamfered housing with a turned
+// hood, a clamp, glass front and back, and the emitter inside. Named so the viewmodel can
+// find the emitter: aimed, you look through the rear glass to the dot.
+const optic=model('optic')
+box(optic,'alloy',.03,.012,.06,0,.063,-.045,0,0,0,.002)                          // clamp / riser
+box(optic,'edge',.034,.006,.012,0,.063,-.03)                                     // clamp screw block
+box(optic,'alloy',.028,.022,.056,0,.080,-.045,0,0,0,.004)                        // body
+// An OPEN tube (outer wall, then back along the inner wall), so you look through it to the dot.
+optic.add('alloy',turned([[-.075,.0145],[-.075,.017],[-.072,.0175],[-.018,.0175],[-.015,.016],[-.015,.0145],[-.075,.0145]],18),0,.092,0) // hood
+optic.add('edge',turned([[-.076,.012],[-.076,.0165],[-.074,.0165],[-.074,.012]],18),0,.092,0) // rear bezel
+optic.add('edge',turned([[-.016,.012],[-.016,.0165],[-.014,.0165],[-.014,.012]],18),0,.092,0) // front bezel
+box(optic,'edge',.012,.006,.012,.016,.088,-.045)                                 // brightness dial
+box(optic,'rubber',.03,.004,.03,0,.1105,-.045,0,0,0,.001)                         // top cap
+optic.add('glass',new T.CylinderGeometry(.0135,.0135,.0015,18),0,.092,-.0735,Math.PI/2)
+optic.add('glass',new T.CylinderGeometry(.0135,.0135,.0015,18),0,.092,-.0165,Math.PI/2)
+optic.add('reticle',new T.CylinderGeometry(.0028,.0028,.001,12),0,.092,-.04,Math.PI/2)
+rifle.group.add(optic.finish())
 // Buffer tube, collapsible stock (cheek riser, sling slot, rubber butt pad). A named node:
 // shouldered, the stock is under the cheek and out of sight, so the viewmodel hides it.
 const stock=model('stock')
@@ -94,6 +150,8 @@ box(stock,'alloy',.03,.01,.012,0,.004,-.172)                   // castle nut / e
 stock.add('polymer',profile([[-.25,.034],[-.42,.04],[-.43,.03],[-.43,-.075],[-.405,-.085],[-.35,-.02],[-.27,-.008],[-.25,.0]],.042,.005,[null,null,null,null,null,[-.37,-.07],null,null]))
 box(stock,'rubber',.046,.122,.016,0,-.019,-.437,0,0,0,.004)
 box(stock,'rubber',.044,.008,.05,0,.04,-.33,0,0,0,.002)
+stock.add('edge',new T.CylinderGeometry(.007,.007,.046,12),0,-.03,-.39,0,0,Math.PI/2) // QD sling cup
+box(stock,'alloy',.046,.004,.03,0,-.058,-.37,0,0,0,.001)                              // sling slot lip
 rifle.group.add(stock.finish())
 // Magazine, a separate node for the reload: slightly curved, ribbed, with a base plate.
 const magazine=model('magazine')
@@ -101,7 +159,7 @@ magazine.add('polymer',profile([[-.04,-.065],[.036,-.065],[.042,-.15],[.058,-.23
 for(let i=0;i<4;i++) magazine.add('rubber',profile([[-.024-i*.002,-.09-i*.035],[.04+i*.004,-.09-i*.035],[.041+i*.004,-.094-i*.035],[-.025-i*.002,-.094-i*.035]],.028,.0008))
 magazine.add('rubber',profile([[-.016,-.238],[.062,-.229],[.064,-.243],[-.014,-.252]],.03,.0025))
 rifle.group.add(magazine.finish())
-const rifleGroup=rifle.finish();rifleGroup.userData={license:'MIT',units:'metres',barrelAxis:'+Z',length:.895,authored:true}
+const rifleGroup=rifle.finish();rifleGroup.userData={license:'MIT',units:'metres',barrelAxis:'+Z',length:.895,authored:true,parts:['stock','magazine','optic'],wearMask:'COLOR_0 (r edge, g exposure)'}
 
 // Unit-envelope modules; instances scale to the existing collision boxes exactly.
 const kit=new T.Group();kit.name='CZ modular production kit'

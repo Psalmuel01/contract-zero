@@ -108,6 +108,8 @@ export interface ZoneTheme {
   /** Gradient sky dome: zenith → horizon colour. This is the actual sky the
    *  player sees above the compound walls (day blue / evening gold / night). */
   sky: { top: string; bottom: string };
+  /** Exposure multiplier for the hour (the site grade sets it; 1 when absent). */
+  exposure?: number;
 }
 
 export const ZONE_THEMES: Record<string, ZoneTheme> = {

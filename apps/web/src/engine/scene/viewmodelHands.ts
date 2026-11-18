@@ -97,8 +97,7 @@ export function disposeHandMaterials(): void {
 
 // ── Primitives ────────────────────────────────────────────────────────────────
 
-/** A rounded box, same construction the procedural guns use, returned as geometry
- *  so it can be merged rather than drawn on its own. */
+/** A rounded box, returned as geometry so it can be merged rather than drawn on its own. */
 function box(w: number, h: number, d: number, r = 0.005): THREE.BufferGeometry {
   const radius = Math.min(r, w / 2.2, h / 2.2, d / 2.2);
   const shape = new THREE.Shape();
@@ -135,17 +134,41 @@ function at(
   return geo;
 }
 
-/** A tapered limb — the forearm. Cylinders are cheap and the sleeve is the one part
- *  of this rig with no hard edges. Built hanging straight DOWN from its origin, so
- *  the wrist is the pivot and a single X rotation swings it back toward the elbow. */
+/** A tapered limb (the forearm), hanging straight DOWN from its origin so the wrist
+ *  is the pivot and a single X rotation swings it back toward the elbow. */
 function limb(rTop: number, rBot: number, len: number): THREE.BufferGeometry {
-  const g = new THREE.CylinderGeometry(rTop, rBot, len, 10, 1);
+  const g = new THREE.CylinderGeometry(rTop, rBot, len, 12, 1);
   g.translate(0, -len / 2, 0);
   return g;
 }
 
+/**
+ * A finger segment between two joints: a capsule from `a` to `b`, slightly squashed
+ * so it reads as a gloved finger rather than a tube. Low segment counts: there are
+ * fourteen of these per hand and they are a few pixels wide on screen.
+ */
+function segment(a: THREE.Vector3, b: THREE.Vector3, r: number): THREE.BufferGeometry {
+  const len = a.distanceTo(b);
+  const g = new THREE.CapsuleGeometry(r, len, 2, 7);
+  // CapsuleGeometry runs along +Y; aim it from a to b.
+  const dir = b.clone().sub(a).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+  g.applyQuaternion(q);
+  g.scale(1, 1, 1);
+  const mid = a.clone().add(b).multiplyScalar(0.5);
+  g.translate(mid.x, mid.y, mid.z);
+  return g;
+}
+
 function merge(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  return mergeGeometries(parts, false) ?? parts[0];
+  // Capsules and spheres come indexed, extruded boxes do not, and mergeGeometries
+  // refuses a mix. Everything is flattened first; a hand is a few thousand triangles.
+  const flat = parts.map((g) => {
+    const out = g.index ? g.toNonIndexed() : g;
+    for (const k of Object.keys(out.attributes)) if (k !== 'position' && k !== 'normal') out.deleteAttribute(k);
+    return out;
+  });
+  return mergeGeometries(flat, false) ?? flat[0];
 }
 
 // ── One hand ──────────────────────────────────────────────────────────────────
@@ -153,81 +176,125 @@ function merge(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
 export interface HandOptions {
   /** Mirror the whole hand across X. The two hands are the same model handed. */
   left?: boolean;
-  /** Overall size. 1 ≈ an adult hand at 0.09m across; a pistol wants it no smaller,
-   *  a big rifle can carry a touch more. */
+  /** Overall size. 1 ≈ an adult hand at 0.09m across. */
   scale?: number;
   /** How far the fingers curl around, 0..1. A support hand on a fat handguard opens
    *  out; a firing hand on a thin grip closes right up. */
   curl?: number;
+  /** Radius of what the fingers wrap (a pistol grip ≈ 0.02, a handguard ≈ 0.03). */
+  gripRadius?: number;
   /** Length of the forearm running back out of frame. 0 for none. */
   forearm?: number;
-  /**
-   * How far the forearm swings BACK from straight down, in radians: 0 hangs at the
-   * wrist, π/2 runs horizontally back toward the shooter. The firing arm wants a lot
-   * (elbow tucked at the ribs), the support arm much less — it comes up to the
-   * handguard from below, and that difference is most of what stops the two reading
-   * as the same arm twice.
-   */
+  /** How far the forearm swings BACK from straight down, in radians. */
   forearmPitch?: number;
   /** Splay of the forearm away from the weapon's centre line. */
   forearmYaw?: number;
+  /** Index finger straight along the side (off the trigger) instead of curled. */
+  indexStraight?: boolean;
+  /** Thumb laid forward along the grip's far side (a support hand's thumb along the
+   *  handguard) rather than hooked over the back. */
+  thumbForward?: boolean;
+  /** Where the forearm runs from the wrist, in the hand's own frame. Overrides the
+   *  pitch/yaw pair; used when the hand is rolled under a handguard. */
+  forearmDir?: [number, number, number];
 }
 
 /**
- * A gloved fist, built around a grip that runs vertically through its centre.
+ * A gloved hand, built around a grip that runs vertically through its origin.
  *
  * Local frame: +Y is up the grip (toward the wrist), +Z is toward the muzzle, +X is
- * outboard. The origin sits where the grip passes through the palm, so a caller
- * positions a hand by saying where on the weapon it is holding — not by working out
- * where its wrist ends up.
+ * outboard (the back of the hand). The origin sits where the grip passes through the
+ * palm, so a caller positions a hand by saying where on the weapon it is holding.
+ *
+ * Fingers are articulated: three capsule segments each, walked around an arc of the
+ * grip's radius and pulled tighter by `curl`, so a fist actually closes around the
+ * grip and an open hand actually cups a handguard. At viewmodel size that outline,
+ * with the knuckle plate and the cuff, is the whole read of "tactical glove".
  */
 export function buildHand(opts: HandOptions = {}): THREE.Group {
   const s = opts.scale ?? 1;
-  const curl = opts.curl ?? 1;
-  // Handedness is a mirrored LAYOUT, not a mirrored object. Scaling a group by -1 on
-  // X reverses triangle winding, so every face culls backwards and the lighting is
-  // inside-out; the usual patch (render the back side instead) leaves the normals
-  // wrong and the hand lit from the inside. Every part here is symmetric in X, so
-  // negating the X offsets and the Y/Z rotations gives a true mirror with correct
-  // winding and normals, and costs nothing.
+  const curl = THREE.MathUtils.clamp(opts.curl ?? 1, 0, 1);
+  const R = (opts.gripRadius ?? 0.019) + 0.011; // joint path radius: grip plus the finger's own radius
+  // Handedness is a mirrored LAYOUT, not a mirrored object (a -1 scale reverses the
+  // winding and lights the glove from the inside). Every X offset and Y/Z rotation
+  // is negated instead.
   const m = opts.left ? -1 : 1;
   const glove: THREE.BufferGeometry[] = [];
   const palm: THREE.BufferGeometry[] = [];
   const sleeve: THREE.BufferGeometry[] = [];
 
-  // Back of the hand: the big slab that carries the silhouette, outboard of the grip.
-  glove.push(at(box(0.030, 0.098, 0.076, 0.012), m * 0.026, 0.004, 0.002));
-  // Knuckle guard — a hard plate across the back, the detail that says "tactical
-  // glove" rather than "mitten" in one shape.
-  glove.push(at(box(0.026, 0.030, 0.062, 0.008), m * 0.030, 0.036, 0.010));
+  // Palm: the slab outboard of the grip, slightly cupped toward it.
+  glove.push(at(box(0.024, 0.088, 0.072, 0.012), m * 0.030, 0.006, -0.004, 0, 0, m * 0.06));
+  // The rubberised palm facing the grip, where it actually bears.
+  palm.push(at(box(0.012, 0.080, 0.062, 0.009), m * 0.018, 0.004, -0.002));
+  // Knuckle plate: the hard shell across the back at the knuckle line.
+  glove.push(at(box(0.014, 0.026, 0.066, 0.006), m * 0.040, 0.028, 0.004, 0.12, 0, m * -0.1));
 
-  // Fingers, wrapping the FRONT of the grip (+Z) and curling inboard. Four ridges
-  // down the front rather than four articulated digits: at the size this is drawn,
-  // the ridge line is the whole read.
-  for (let i = 0; i < 4; i++) {
-    const y = 0.032 - i * 0.024;
-    const reach = 0.052 * (0.82 + 0.18 * curl);          // how far across the grip it comes
-    const drop = curl * 0.010 * i;                        // lower fingers curl further under
-    glove.push(at(box(reach, 0.019, 0.030, 0.008), m * (0.026 - reach / 2), y - drop, 0.028, 0, 0, m * -curl * 0.12));
-    // Pad on the inside face of each finger, where it actually contacts the weapon.
-    palm.push(at(box(reach * 0.8, 0.013, 0.010, 0.004), m * (0.026 - reach / 2), y - drop, 0.043));
+  // Fingers. Each starts at the palm's front edge and walks an arc around the grip
+  // axis; curl shortens the arc's radius and closes the final joints further.
+  const FINGERS: { y: number; len: number; r: number }[] = [
+    { y: 0.034, len: 1.0, r: 0.0098 },   // index
+    { y: 0.010, len: 1.08, r: 0.0100 },  // middle
+    { y: -0.014, len: 1.0, r: 0.0094 },  // ring
+    { y: -0.037, len: 0.82, r: 0.0086 }, // little
+  ];
+  const SEG = [0.040, 0.027, 0.022];
+  FINGERS.forEach((f, fi) => {
+    const straight = opts.indexStraight && fi === 0;
+    const radius = R * (straight ? 1.5 : 1 / (0.55 + 0.45 * curl));
+    // Start angle, measured from +X toward +Z: front-outboard of the grip.
+    let a = 0.62;
+    let y = f.y;
+    const pts: THREE.Vector3[] = [new THREE.Vector3(m * Math.cos(a) * radius, y, Math.sin(a) * radius)];
+    for (let k = 0; k < 3; k++) {
+      const len = SEG[k] * f.len;
+      // A straight index lies along the grip's side; a curled finger wraps.
+      const sweep = straight ? 0.08 : (len / radius) * (0.55 + 0.45 * curl) * (k === 0 ? 1 : 0.85 + 0.15 * curl);
+      a += sweep;
+      y -= 0.0035 * (1 + 0.6 * k) * (straight ? 0.3 : 1); // fingers slant down the grip
+      pts.push(new THREE.Vector3(m * Math.cos(a) * radius, y, Math.sin(a) * radius + (straight ? len * 0.9 : 0) * (k + 1) * 0.5));
+    }
+    for (let k = 0; k < 3; k++) {
+      const r = f.r * (1 - k * 0.08);
+      glove.push(segment(pts[k], pts[k + 1], r));
+      // A knuckle at each joint, and a pad on the inside of each segment.
+      if (k > 0) { const j = new THREE.SphereGeometry(r * 1.08, 7, 6); j.translate(pts[k].x, pts[k].y, pts[k].z); glove.push(j); }
+    }
+    // Pad under the last two segments (the part that touches the grip).
+    const pad = segment(pts[1], pts[3], f.r * 0.72);
+    pad.translate(m * -0.002, 0, 0);
+    palm.push(pad);
+  });
+
+  // Thumb: two segments. Hooked over the back of the grip (firing hand), or laid
+  // forward along its far side (support hand along a handguard).
+  {
+    const base = new THREE.Vector3(m * 0.024, 0.044, -0.020);
+    const mid = opts.thumbForward
+      ? new THREE.Vector3(m * -0.012, 0.030, -0.012)
+      : new THREE.Vector3(m * -0.006, 0.040, -0.030);
+    const tip = opts.thumbForward
+      ? new THREE.Vector3(m * -0.022, -0.012, -0.004)
+      : new THREE.Vector3(m * -0.026, 0.028, -0.014);
+    glove.push(segment(base, mid, 0.0115));
+    glove.push(segment(mid, tip, 0.0100));
+    const j = new THREE.SphereGeometry(0.012, 7, 6); j.translate(mid.x, mid.y, mid.z); glove.push(j);
+    const web = box(0.026, 0.030, 0.026, 0.009); at(web, m * 0.016, 0.040, -0.014, 0.3, 0, m * -0.5); glove.push(web);
   }
 
-  // Thumb: comes over the top-front, across the grip. The one part that breaks the
-  // fist's symmetry, and the reason a hand reads as a hand and not a block.
-  glove.push(at(box(0.022, 0.048, 0.026, 0.009), m * 0.020, 0.040, -0.026, 0.5, 0, m * -0.35));
-
-  // Rubberised palm facing the grip, the surface doing the gripping.
-  palm.push(at(box(0.014, 0.086, 0.070, 0.010), m * 0.008, 0.002, 0.002));
-
-  // Glove cuff, then the sleeve running back out of frame.
-  glove.push(at(box(0.038, 0.026, 0.082, 0.011), m * 0.026, 0.062, -0.002));
+  // Glove cuff with its strap, then the sleeve running back out of frame.
+  glove.push(at(box(0.040, 0.026, 0.078, 0.011), m * 0.028, 0.066, -0.004));
+  palm.push(at(box(0.043, 0.008, 0.080, 0.003), m * 0.028, 0.070, -0.004)); // the wrist strap (darker)
   const fa = opts.forearm ?? 0;
   if (fa > 0) {
-    const arm = limb(0.033, 0.026, fa);
-    // Hangs down from the wrist; +X rotation swings it BACK toward the elbow, which
-    // in the weapon's frame is -Z (the muzzle is +Z, so the shooter is behind it).
-    at(arm, m * 0.026, 0.070, -0.004, opts.forearmPitch ?? 0.9, m * (opts.forearmYaw ?? 0), 0);
+    const arm = limb(0.034, 0.028, fa);
+    if (opts.forearmDir) {
+      const d = new THREE.Vector3(...opts.forearmDir).normalize();
+      arm.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, -1, 0), d));
+      arm.translate(m * 0.028, 0.076, -0.006);
+    } else {
+      at(arm, m * 0.028, 0.076, -0.006, opts.forearmPitch ?? 0.9, m * (opts.forearmYaw ?? 0), 0);
+    }
     sleeve.push(arm);
   }
 
@@ -410,30 +477,35 @@ export function buildViewmodelHands(gunId: GunId, gun: THREE.Object3D, len: numb
   // frame with hands off, it was covering aim. The support arm can afford real
   // length because it hangs from a hand further down the barrel and leaves through
   // the bottom edge; this one cannot, so it stops at the wrist.
-  const fire = buildHand({ scale: tune.scale ?? 1, curl: 1, forearm: 0.055, forearmPitch: 0.5 });
-  fire.position.set(...anchor(tune.fire, 0.006));
+  const fire = buildHand({ scale: tune.scale ?? 1, curl: 1, gripRadius: 0.017, forearm: 0.06, forearmPitch: 0.55 });
+  fire.position.set(...anchor(tune.fire, 0.004));
   fire.rotation.set(-0.16, 0, 0.10);   // wrist rake up the grip
   group.add(fire);
 
   if (tune.support !== null) {
-    // SUPPORT hand: left, out on the handguard, thumb-forward, opened out because a
-    // handguard is fatter than a grip. Its forearm drops away far less steeply — that
-    // arm comes UP to the weapon from below, which is what stops it reading as a
-    // second firing hand stuck on backwards.
+    // SUPPORT hand: left, UNDER the handguard. The hand's grip axis is rolled onto
+    // the barrel line (palm up, fingers wrapping up the far side, thumb over the
+    // near side pointing at the muzzle), and its forearm runs back, down and out to
+    // the left shoulder. That C-clamp is what reads as a rifle being held, not a
+    // second pistol grip.
     const support = buildHand({
-      left: true, scale: tune.scale ?? 1, curl: 0.72, forearm: 0.13,
-      forearmPitch: 0.32, forearmYaw: 0.24,
+      left: true, scale: tune.scale ?? 1, curl: 0.62, gripRadius: 0.028, forearm: 0.16,
+      thumbForward: true, forearmDir: [-0.55, 0.75, 0.42],
     });
-    support.position.set(...anchor(tune.support, -0.010));
+    support.position.set(...anchor(tune.support, -0.004));
     support.name = 'support-hand';
     support.userData.restY = support.position.y;
-    support.rotation.set(0.24, 0, -0.16);
+    // Local X (palm side) -> up, local Y (wrist) -> back, local Z -> left; then the
+    // wrist dropped a little so the arm comes from below.
+    support.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0)));
+    support.rotateOnWorldAxis(new THREE.Vector3(1, 0, 0), -0.35);
+    support.rotateOnWorldAxis(new THREE.Vector3(0, 0, 1), 0.25);
     group.add(support);
   } else {
     // A pistol is held in BOTH hands, stacked: the support hand wraps the firing
     // hand's fingers rather than reaching for a handguard that does not exist.
     const cup = buildHand({
-      left: true, scale: (tune.scale ?? 1) * 0.96, curl: 0.5, forearm: 0.10,
+      left: true, scale: (tune.scale ?? 1) * 0.96, curl: 0.5, gripRadius: 0.03, forearm: 0.10,
       forearmPitch: 0.5, forearmYaw: 0.3,
     });
     const [x, y, z] = anchor(tune.fire, -0.034);
