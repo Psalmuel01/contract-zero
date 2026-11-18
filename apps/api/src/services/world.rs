@@ -36,8 +36,14 @@ pub struct WorldService {
 /// trade or raid settles).
 const FLOW_SYNC_TICKS: u64 = 12;
 
-/// Snapshots kept per world; older ones are pruned.
-const KEEP_SNAPSHOTS: i64 = 500;
+/// Snapshots kept per world; older ones are pruned. Only the newest is ever read (on
+/// boot); the rest are a short rollback window. Each is ~400 KB stored and one is
+/// written per tick, so 500 of them held ~200 MB and kept a small database's disk
+/// busy enough to exhaust its IO budget (2026-11-18: every query slowed to seconds,
+/// the world tick timed out, the contract board stopped answering).
+const KEEP_SNAPSHOTS: i64 = 20;
+/// Old snapshots deleted per tick at most (one is written per tick, so >1 drains a backlog).
+const PRUNE_PER_TICK: i64 = 2;
 
 impl WorldService {
     /// Load the latest snapshot, or create the genesis world from `WORLD_SEED`.
@@ -262,11 +268,13 @@ async fn persist(db: &mut PgConnection, w: &mut World) -> Result<(), sqlx::Error
         .bind(len as i64)
         .execute(&mut *db)
         .await?;
-    // Prune only current-format snapshots (small). Old-format ones (each carrying the whole
-    // ledger, ~1 MB stored) are left as a static archive: deleting them one per tick cost
-    // ~2.8 MB of WAL each, as much as the old design. They cost disk space, not I/O.
-    sqlx::query("DELETE FROM world_snapshots WHERE ledger_len IS NOT NULL AND id <= (SELECT max(id) FROM world_snapshots) - $1")
+    // Prune everything older than the window, old-format rows included: kept as an
+    // "archive" they grew to 263 MB and pushed the database past its storage limit.
+    // At most PRUNE_PER_TICK rows a tick, oldest first, so a backlog drains over time
+    // instead of one huge delete timing out inside the tick's transaction.
+    sqlx::query("DELETE FROM world_snapshots WHERE id IN (SELECT id FROM world_snapshots WHERE id <= (SELECT max(id) FROM world_snapshots) - $1 ORDER BY id LIMIT $2)")
         .bind(KEEP_SNAPSHOTS)
+        .bind(PRUNE_PER_TICK)
         .execute(&mut *db)
         .await?;
     Ok(())
