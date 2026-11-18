@@ -222,6 +222,7 @@ function fieldFor(c: ConvoyContract, kind: OpKind, st: Setting) {
     cargoLabel: st.label,
     exfilLabel: st.site?.exfil ?? (st.lv.id === 'blacksite' ? 'landing zone outside the gate' : 'the flatbed at the south gate'),
     handoverLabel: kind === 'recovery' && st.site ? st.site.exfil : `${c.issuer ?? 'the owner'}'s truck`,
+    milestones: { entry: st.lv.points.entry, push: st.lv.points.push },
   });
 }
 
