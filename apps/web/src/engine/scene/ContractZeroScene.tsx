@@ -3477,6 +3477,15 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
           const d = Math.round(Math.hypot(pos.current.x - objN.pos[0], pos.current.z - objN.pos[1]));
           h.objText.textContent = `OBJECTIVE  ·  ${objN.text}  ·  ${d}m`;
         }
+        // Guards awake and alive in the fight right now (dormant rooms ahead don't count
+        // until you wake them). Reinforcements during the load and the extraction push
+        // this back up, so a count that rises again says "more coming", not a bug.
+        // Nothing shows before the first room wakes: "0 left" at the gate would be a lie.
+        const foes = sim.getEnemies();
+        if (foes.some((e) => e.active)) {
+          const hostiles = foes.reduce((n, e) => n + (e.alive && e.active ? 1 : 0), 0);
+          h.objText.textContent += `  ·  ${hostiles} HOSTILE${hostiles === 1 ? '' : 'S'} LEFT`;
+        }
       } else {
         h.objText.style.opacity = '0';
       }
