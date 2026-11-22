@@ -218,3 +218,38 @@ describe('battlefield weapons', () => {
     expect(f.items.get(w.id)!.state).toBe('empty');
   });
 });
+
+describe('cargo waits for the inner site (the server rejects it otherwise)', () => {
+  const m = practiceManifest('raid', 60, 2);
+  const withPoints = { ...opts, milestones: { entry: lv.points.entry, push: lv.points.push } };
+
+  it('refuses a case before the push, and records entry and push as you pass them', () => {
+    const f = new FieldRuntime(buildField('raid', lv.field, m, withPoints));
+    const pk = pockets();
+    const c1 = f.items.get('case-1')!;
+    const early = holdOn(f, c1.pos, CASE_SECS + 0.2, pk);
+    expect(early.some((e) => e.kind === 'refused')).toBe(true);
+    expect(f.carried).toEqual([]);
+    // the push before the entry doesn't count (the server wants them in order)
+    f.update(0.1, at(lv.points.push), false, pk, clear);
+    expect(f.reached.has('push')).toBe(false);
+    f.update(0.1, at(lv.points.entry), false, pk, clear);
+    f.update(0.1, at(lv.points.push), false, pk, clear);
+    f.update(0.1, at(lv.points.push), false, pk, clear);
+    const reach = f.log.filter((e) => e.kind === 'reach').map((e) => (e as { milestone: string }).milestone);
+    expect(reach).toEqual(['entry', 'push']); // once each, in order
+    holdOn(f, c1.pos, CASE_SECS + 0.2, pk);
+    expect(f.carried).toEqual(['case-1']);
+    const collect = f.log.findIndex((e) => e.kind === 'collect');
+    const push = f.log.findIndex((e) => e.kind === 'reach' && (e as { milestone: string }).milestone === 'push');
+    expect(push).toBeGreaterThanOrEqual(0);
+    expect(collect).toBeGreaterThan(push);
+  });
+
+  it('a milestone noted by the objective list is not reported twice', () => {
+    const f = new FieldRuntime(buildField('raid', lv.field, m, withPoints));
+    f.update(0.1, at(lv.points.entry), false, pockets(), clear);
+    f.note('reach', 'entry');
+    expect(f.log.filter((e) => e.kind === 'reach')).toHaveLength(1);
+  });
+});

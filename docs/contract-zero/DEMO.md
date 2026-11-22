@@ -8,7 +8,7 @@ There are two ways to run it:
 
 ## Before recording
 
-**On the live site** (<https://contract-zero.vercel.app>):
+**On the live site** (<https://contractzero.netlify.app>):
 - Sign in with **I already have a NEAR wallet**, using a funded testnet account.
 - Google sign-in on the live site waits for this app's own NEAR Auth credentials.
 - Steps 2–16 are unchanged.

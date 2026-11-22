@@ -122,12 +122,20 @@ export interface FieldSpec {
   cargoLabel?: string;
   /** Sabotage charge targets in order (labels for objectives). */
   charges?: { id: string; pos: [number, number]; target: string }[];
+  /** The objective points the server checks (entry, then push). When set, the runtime
+   *  records each as you pass it, and cargo can't be taken before the push: the server
+   *  rejects a run whose cargo was taken before it (services/protocol.rs). */
+  milestones?: { entry: [number, number]; push: [number, number] };
 }
+
+/** How close counts as reaching a milestone; under the server's MILESTONE_REACH (5 m). */
+export const MILESTONE_RADIUS = 4.5;
 
 /** Place a manifest on a level. Cases sit at the cargo point; supplies where the
  *  level keeps them; charges on the two named targets. */
 export function buildField(kind: OpKind, layout: FieldLayout, m: FieldManifest, o: {
   charges: [[number, number], [number, number]]; chargeTargets: [string, string]; cargoLabel: string; exfilLabel: string; handoverLabel: string;
+  milestones?: { entry: [number, number]; push: [number, number] };
 }): FieldSpec {
   const items: Interactable[] = [];
   m.cases.forEach((c, i) => {
@@ -155,7 +163,7 @@ export function buildField(kind: OpKind, layout: FieldLayout, m: FieldManifest, 
   const spot = kind === 'recovery' ? layout.handover : layout.exfil;
   const exfil: ExfilZone = { ...spot, mode: kind === 'recovery' ? 'handover' : 'extract', label: kind === 'recovery' ? o.handoverLabel : o.exfilLabel, secs: EXTRACT_SECS };
   items.push({ id: 'exfil', kind: 'exfil', pos: spot.pos, y: 1.0, holdSecs: 1.0, label: kind === 'recovery' ? 'SIGNAL THE HANDOVER' : 'CALL EXTRACTION', state: 'idle' });
-  return { kind, items, exfil, cargoLabel: o.cargoLabel, charges };
+  return { kind, items, exfil, cargoLabel: o.cargoLabel, charges, milestones: o.milestones };
 }
 
 /** A training compound's field: its extract objective becomes a real zone. */
@@ -240,6 +248,8 @@ export class FieldRuntime {
   /** Protocol events for the server, drained by the scene each frame. */
   log: ProtoEvent[] = [];
   private lastPos: [number, number] = [0, 0];
+  /** Milestones already reported to the server. */
+  readonly reached = new Set<'entry' | 'push'>();
 
   /** Game time in ms, as the protocol reports it. */
   get ms(): number { return Math.round(this.time * 1000); }
@@ -247,7 +257,11 @@ export class FieldRuntime {
   note(kind: 'pos'): void;
   note(kind: 'reach', milestone: 'entry' | 'push'): void;
   note(kind: 'pos' | 'reach', milestone?: 'entry' | 'push'): void {
-    if (kind === 'reach' && milestone) this.log.push({ kind, milestone, t: this.ms, pos: this.lastPos });
+    if (kind === 'reach' && milestone) {
+      if (this.reached.has(milestone)) return;
+      this.reached.add(milestone);
+      this.log.push({ kind, milestone, t: this.ms, pos: this.lastPos });
+    }
     else this.log.push({ kind: 'pos', t: this.ms, pos: this.lastPos });
   }
 
@@ -323,6 +337,14 @@ export class FieldRuntime {
   update(dt: number, v: ViewState, interact: boolean, pockets: Pockets, losClear: (a: [number, number, number], b: [number, number, number]) => boolean): FieldEvent[] {
     this.time += dt;
     this.lastPos = [+v.x.toFixed(2), +v.z.toFixed(2)];
+    // Record a milestone the moment you stand on it, whatever step the objective list is
+    // on: a player who takes another way round (or runs ahead) still passed it.
+    const ms = this.spec.milestones;
+    if (ms) {
+      const near = (p: [number, number]) => Math.hypot(this.lastPos[0] - p[0], this.lastPos[1] - p[1]) <= MILESTONE_RADIUS;
+      if (!this.reached.has('entry') && near(ms.entry)) this.note('reach', 'entry');
+      if (this.reached.has('entry') && !this.reached.has('push') && near(ms.push)) this.note('reach', 'push');
+    }
     const out: FieldEvent[] = [];
     if (this.exfilPhase === 'locked' && this.exfilAllowed) this.exfilPhase = 'ready';
 
@@ -371,6 +393,7 @@ export class FieldRuntime {
 
   private precheck(t: Interactable, p: Pockets): FieldEvent | null {
     if (t.kind === 'ammo_crate' && t.ammoClass && p.reserveRoom(t.ammoClass) <= 0) return { kind: 'full', id: t.id, what: 'ammo' };
+    if ((t.kind === 'cargo_case' || t.kind === 'seized_case') && this.spec.milestones && !this.reached.has('push')) return { kind: 'refused', why: 'GO THROUGH THE INNER SITE FIRST · FOLLOW THE OBJECTIVE MARKER' };
     if ((t.kind === 'cargo_case' || t.kind === 'seized_case') && this.carried.length >= CARRY_MAX) return { kind: 'full', id: t.id, what: 'cargo' };
     if (t.kind === 'exfil' && !this.canExtract()) return { kind: 'refused', why: this.refusal() };
     if (t.kind === 'weapon' && t.gun && p.loadout?.includes(t.gun) && p.reserveRoom(roundsFor(t.gun)) <= 0) return { kind: 'full', id: t.id, what: 'ammo' };

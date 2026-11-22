@@ -1505,7 +1505,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       detonated: FIELD.detonated, target: FIELD.target?.id ?? null, hold: FIELD.hold, record: FIELD.record(),
       exfil: FIELD.spec.exfil ? { pos: FIELD.spec.exfil.pos, radius: FIELD.spec.exfil.radius, mode: FIELD.spec.exfil.mode } : null,
       items: [...FIELD.items.values()].map((i) => ({ id: i.id, kind: i.kind, pos: i.pos, state: i.state, rounds: i.rounds, medkits: i.medkits, units: i.units })),
-      reserve: sim.reserve, medkits: sim.medkits, ammo: sim.ammo, speed: FIELD.speedMult,
+      reserve: sim.reserve, medkits: sim.medkits, ammo: sim.ammo, speed: FIELD.speedMult, reached: [...FIELD.reached],
     });
     w.__czState = () => sim.snapshot();
     w.__czProps = () => dressingFor(mission); // set-dressing placements (headless visual check)
