@@ -1,28 +1,28 @@
-# Deploying CONTRACT ZERO: Supabase + Railway + Vercel
+# Deploying CONTRACT ZERO: Neon + Railway + Netlify
 
 **The three parts:**
-- **Postgres** on Supabase;
+- **Postgres** on Neon (any Postgres 15+ works; it ran on Supabase until Nov 2026);
 - **the API** (Rust: economy, settlement worker, auth, NEAR) on Railway, from `apps/api/Dockerfile`;
-- **the web app** (Next.js) on Vercel, from `apps/web`.
+- **the web app** (Next.js) on Netlify, from `apps/web`.
 
 The contracts are already live on NEAR testnet (see NEAR.md), so nothing on chain changes here.
 
 **No key or secret is ever committed or baked into an image.** The API reads its signing keys from one secret variable, `CZ_KEYS_JSON` (below).
 
-## 1. Database (Supabase)
+## 1. Database (Neon)
 
-1. Create a project. The region should be close to the Railway region.
-2. Copy a connection string. Use either:
-   - **the Session pooler** (port 5432 on the pooler host), or
-   - **the direct connection**.
+1. Create a project in the region nearest the API. Railway runs the API in `europe-west4`, so use **AWS Frankfurt (eu-central-1)**.
+2. Copy the **direct** connection string: the host without `-pooler`.
+   - **Not the pooled one.** The API holds a session-level advisory lock as the single world writer, and a transaction pooler can't keep it.
+   - On Supabase, the equivalent is the Session pooler (port 5432) or the direct connection, never the Transaction pooler (port 6543).
+3. Keep `?sslmode=require`. The API runs every migration on boot (they're embedded in the binary).
+4. **To keep the current world, move the existing database instead of starting fresh.** Use [DATABASE_MOVE.md](DATABASE_MOVE.md). It keeps the world's tick, ledger, orders, standings, accounts and settlement history.
+   - A fresh database creates a new genesis world and realigns the actors' testnet balances to it on first boot. That works, but it erases the story so far.
 
-   **Not the Transaction pooler (port 6543).** The API holds a session-level advisory lock as the single world writer and uses prepared statements, and the transaction pooler supports neither.
-3. Append `?sslmode=require`. The API runs every migration on boot (they're embedded in the binary).
-4. **To keep the current world, restore the local database instead of starting fresh:**
-   ```sh
-   pg_dump --no-owner --no-acl "$LOCAL_DATABASE_URL" | psql "$SUPABASE_DATABASE_URL"
-   ```
-   This keeps the world's tick, ledger, orders, standings and settlement history. A fresh database creates a new genesis world and realigns the actors' testnet balances to it on first boot. That works, but it erases the story so far.
+**Free-plan budget.** Neon Free gives each project 1 GB of storage, 5 GB of network transfer and 100 CU-hours of compute a month. When transfer or compute runs out, the database is suspended until the next month.
+- The database is about 0.25 GB.
+- The API ticks every minute, so the database never scales to zero. 100 CU-hours is roughly 16 days at the smallest size; budget for that during judging.
+- Each API restart reads the whole world ledger (about 130 MB at 88,000 entries). Avoid redeploying in a loop.
 
 ## 2. API (Railway)
 
@@ -32,7 +32,7 @@ cd apps/api
 railway init                         # or: railway link to an existing project
 railway variables --set "DATABASE_URL=postgresql://…:5432/postgres?sslmode=require" \
   --set "CZ_ENV=production" \
-  --set "FRONTEND_ORIGIN=https://<your-vercel-domain>" \
+  --set "FRONTEND_ORIGIN=https://<your-netlify-domain>" \
   --set "AUTH_COOKIE_SECURE=1" \
   --set "WORLD_TICK_SECS=60" --set "AGENT_EVERY_TICKS=1" \
   --set "CZ_WORLD=world2.contract-zero.testnet" --set "CZ_ASSETS=assets.contract-zero.testnet" \
@@ -65,18 +65,25 @@ railway up                           # builds apps/api/Dockerfile, health-checks
 
 **One instance only.** The world has a single writer, enforced by an advisory lock. `numReplicas` is 1 in `railway.toml`, and a second instance would refuse to start.
 
-## 3. Web (Vercel)
+## 3. Web (Netlify)
 
-```sh
-cd apps/web
-vercel link                          # project root: apps/web
-vercel env add NEXT_PUBLIC_API_URL production       # https://<railway-domain>
-vercel env add NEXT_PUBLIC_NEAR_NETWORK production  # testnet
-vercel env add NEXT_PUBLIC_NEAR_RPC production      # https://rpc.testnet.fastnear.com
-vercel deploy --prod
-```
+1. Create a site from the repository.
+   - **Base directory:** `apps/web`.
+   - **Build command:** `npm run build`.
+   - Netlify detects Next.js and adds its runtime, so the `/api/*` rewrite in `next.config.ts` works.
+2. Set these environment variables for production:
+   - `NEXT_PUBLIC_API_URL=https://<railway-domain>`
+   - `NEXT_PUBLIC_NEAR_NETWORK=testnet`
+   - `NEXT_PUBLIC_NEAR_RPC=https://rpc.testnet.fastnear.com`
+3. Deploy. The live site is <https://contractzero.netlify.app>.
+4. Set `FRONTEND_ORIGIN` on Railway to the exact Netlify origin. It's comma-separated, so the old origin can stay during a move:
+   ```
+   https://contractzero.netlify.app,https://contract-zero.vercel.app
+   ```
+   In production, CORS and the CSRF origin check allow only these origins.
+5. **Email sign-in (Privy):** the app ID comes from the API (`PRIVY_APP_ID` on Railway, served by `/auth/config`). Add the Netlify origin under the Privy app's allowed domains; Privy refuses logins from any domain not listed.
 
-Then set `FRONTEND_ORIGIN` on Railway to the exact Vercel origin. In production, CORS and the CSRF origin check allow only that origin, and session cookies are `Secure; SameSite=None`.
+**Cookies stay first-party.** The browser calls `/api/*` on the Netlify origin, and Netlify forwards it to Railway. The session cookie belongs to the page's own site, so Brave and Safari don't block it.
 
 **Don't set `NEXT_PUBLIC_CZ_DEV_HOOKS` in production.** Without it, the `/dev` routes and the test hooks are off.
 
