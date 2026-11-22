@@ -1,10 +1,10 @@
 // Read-only smoke test of a DEPLOYED site: every main route on a desktop and a phone,
 // signed out (production has no development sign-in). Records page errors, failed or
 // refused API calls (including CORS), and whether the 3D scene comes up.
-//   node probe-prod-smoke.mjs [https://contract-zero.vercel.app]
+//   node probe-prod-smoke.mjs [https://contractzero.netlify.app]
 import { chromium, devices } from '@playwright/test'
 
-const WEB = (process.argv[2] ?? 'https://contract-zero.vercel.app').replace(/\/$/, '')
+const WEB = (process.argv[2] ?? 'https://contractzero.netlify.app').replace(/\/$/, '')
 const ROUTES = ['/', '/contracts', '/exchange', '/war-room', '/operator', '/signin', '/settings', '/training']
 const browser = await chromium.launch({ channel: 'chrome', args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist'] })
 let failures = 0

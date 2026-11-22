@@ -407,6 +407,77 @@ pub const BALANCE_SETTLES_AFTER_SECS: i64 = 1_800;
 /// How long a row refused for balance waits before its next try.
 const BALANCE_RETRY_SECS: i64 = 45;
 
+/// Attempt records kept in full in a settlement's evidence; older ones fold into one
+/// summary record. Agent trades and sells keep every record (without its error text),
+/// because `may_compensate` reads all of them; they stop retrying soon anyway.
+const HISTORY_KEEP: usize = 20;
+/// Newest attempts that keep their error text; older records keep only n/at/outcome/tx/reason.
+const HISTORY_ERRORS_KEPT: usize = 3;
+/// Longest error text stored in an attempt record (the `error` column keeps the full last one).
+const HISTORY_ERROR_CHARS: usize = 1_500;
+/// Consecutive definite chain refusals before a row stops holding the queue: it is
+/// then retried on a slow clock (`defer_reason = 'stuck'`) and later rows go first.
+const STUCK_AFTER: usize = 10;
+/// Longest wait between attempts of a stuck row.
+const STUCK_MAX_WAIT_SECS: i64 = 1_800;
+
+/// Keep a settlement's attempt history bounded.
+///
+/// Every attempt used to append its full error (a whole NEAR execution result, ~7 KB)
+/// and nothing was ever dropped. The claim returns the evidence and the failure path
+/// writes it back, so a row that retried n times moved ~n x 7 KB each way per retry:
+/// quadratic. Two rows that retried ~3,500 and ~4,000 times (Nov 2026) sent the
+/// database's whole free-plan bandwidth several times over and kept its disk busy
+/// enough to time out the world tick.
+pub fn compact_history(history: &mut Vec<Value>, kind: &str) {
+    let n = history.len();
+    for (i, a) in history.iter_mut().enumerate() {
+        let Some(obj) = a.as_object_mut() else { continue };
+        if i + HISTORY_ERRORS_KEPT < n {
+            obj.remove("error");
+        } else if let Some(e) = obj.get("error").and_then(Value::as_str) {
+            if e.chars().count() > HISTORY_ERROR_CHARS {
+                let cut: String = e.chars().take(HISTORY_ERROR_CHARS).collect();
+                obj.insert("error".into(), Value::String(format!("{cut}...")));
+            }
+        }
+    }
+    if kind == "trade" || kind == "sell" || n <= HISTORY_KEEP {
+        return;
+    }
+    // Fold everything but the newest HISTORY_KEEP into one summary record (merging an
+    // earlier summary), so the counts by outcome survive.
+    let older: Vec<Value> = history.drain(..n - HISTORY_KEEP).collect();
+    let mut count = 0u64;
+    let mut outcomes = serde_json::Map::new();
+    let (mut from, mut to) = (i64::MAX, i64::MIN);
+    for a in &older {
+        if a["summary"] == true {
+            count += a["count"].as_u64().unwrap_or(0);
+            if let Some(m) = a["outcomes"].as_object() {
+                for (k, v) in m {
+                    let c = outcomes.get(k).and_then(Value::as_u64).unwrap_or(0) + v.as_u64().unwrap_or(0);
+                    outcomes.insert(k.clone(), c.into());
+                }
+            }
+            from = from.min(a["n_from"].as_i64().unwrap_or(i64::MAX));
+            to = to.max(a["n_to"].as_i64().unwrap_or(i64::MIN));
+        } else {
+            count += 1;
+            let k = a["outcome"].as_str().unwrap_or("unknown").to_string();
+            let c = outcomes.get(&k).and_then(Value::as_u64).unwrap_or(0) + 1;
+            outcomes.insert(k, c.into());
+            if let Some(x) = a["n"].as_i64() { from = from.min(x); to = to.max(x); }
+        }
+    }
+    history.insert(0, json!({ "summary": true, "count": count, "n_from": from, "n_to": to, "outcomes": outcomes }));
+}
+
+/// Definite chain refusals at the end of the history, newest first.
+pub fn trailing_failures(history: &[Value]) -> usize {
+    history.iter().rev().take_while(|a| a["outcome"] == "failed").count()
+}
+
 /// What one submission attempt is known to have done.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -487,7 +558,7 @@ pub async fn claim(db: &sqlx::PgPool, contract: &str, worker: &str) -> Result<Op
          head AS (
              SELECT s.id FROM settlements s, blocked b
              WHERE s.contract = $1 AND s.status IN ('pending', 'submitted')
-               AND NOT coalesce(s.defer_reason IN ('issuance_budget', 'balance') AND s.next_attempt_at > now(), false)
+               AND NOT coalesce(s.defer_reason IN ('issuance_budget', 'balance', 'stuck') AND s.next_attempt_at > now(), false)
                AND (b.id IS NULL OR s.id < b.id OR s.kind IN ('raid', 'operation'))
              ORDER BY (s.kind <> 'genesis'), s.id
              LIMIT 1
@@ -631,6 +702,7 @@ pub async fn process_next(state: &AppState) -> Result<bool, String> {
             }
             let hashes: Vec<String> = verified.iter().map(|v| v.tx_hash.clone()).collect();
             history.push(json!({ "n": attempt, "at": now.timestamp(), "outcome": if already { "already_applied" } else { "confirmed" }, "tx": hashes }));
+            compact_history(&mut history, &kind);
             let evidence = json!({ "already_applied": already, "transactions": verified, "attempts": history });
             sqlx::query("UPDATE settlements SET status = 'confirmed', tx_hashes = $2, evidence = $3, error = NULL, confirmed_at = now(), lease_until = NULL WHERE id = $1 AND claimed_by = $4")
                 .bind(id).bind(&hashes).bind(&evidence).bind(&state.worker_id).execute(db).await.map_err(|e| e.to_string())?;
@@ -648,6 +720,8 @@ pub async fn process_next(state: &AppState) -> Result<bool, String> {
             // already committed and are replay-protected on chain, so they retry until
             // they land: a transient outage delays them, never leaves a gap.
             let give_up = (kind == "trade" || kind == "sell") && may_compensate(&history, now.timestamp());
+            compact_history(&mut history, &kind);
+            let refusals = trailing_failures(&history);
             // The ledger's epoch issuance budget is a known wait, not a fault: defer to
             // the reset instead of retrying every minute.
             // A refusal for insufficient balance waits briefly and lets later rows
@@ -662,6 +736,13 @@ pub async fn process_next(state: &AppState) -> Result<bool, String> {
                 (Some("balance"), Some(now + chrono::Duration::seconds(30)))
             } else if balance && !give_up {
                 (Some("balance"), Some(now + chrono::Duration::seconds(BALANCE_RETRY_SECS)))
+            } else if !give_up && kind != "trade" && kind != "sell" && refusals >= STUCK_AFTER {
+                // The chain has refused this exact operation many times in a row (a
+                // contract panic, not an outage): it will not land by retrying every
+                // minute. Retry it on a slow clock and let the rows behind it through,
+                // as a balance wait does. Nothing is dropped; it stays pending.
+                let wait = (60i64 << (refusals - STUCK_AFTER).min(5)).min(STUCK_MAX_WAIT_SECS);
+                (Some("stuck"), Some(now + chrono::Duration::seconds(wait)))
             } else {
                 (None, None)
             };
@@ -1022,5 +1103,49 @@ mod tests {
         sqlx::query("UPDATE settlements SET next_attempt_at = now() - interval '1 second' WHERE id = $1").bind(ids[0]).execute(&db).await.unwrap();
         assert_eq!(claim(&db, &contract, "w").await.unwrap().unwrap().0, ids[0]);
         sqlx::query("DELETE FROM settlements WHERE contract = $1").bind(&contract).execute(&db).await.unwrap();
+    }
+
+    fn attempt(n: i64, outcome: &str) -> Value {
+        json!({ "n": n, "at": 1_000 + n, "outcome": outcome, "tx": "x".repeat(44), "error": "E".repeat(7_000), "reason": "" })
+    }
+
+    #[test]
+    fn history_stays_bounded_and_keeps_its_counts() {
+        let mut h: Vec<Value> = (1..=4_000).map(|n| attempt(n, "failed")).collect();
+        compact_history(&mut h, "order_place");
+        assert_eq!(h.len(), HISTORY_KEEP + 1);
+        assert_eq!(h[0]["summary"], true);
+        assert_eq!(h[0]["count"], 4_000 - HISTORY_KEEP as u64);
+        assert_eq!(h[0]["n_from"], 1);
+        assert_eq!(h[0]["outcomes"]["failed"], 4_000 - HISTORY_KEEP as u64);
+        assert_eq!(h.last().unwrap()["n"], 4_000);
+        // Only the newest few keep an error, and it is capped.
+        assert_eq!(h.iter().filter(|a| a.get("error").is_some()).count(), HISTORY_ERRORS_KEPT);
+        assert!(h.last().unwrap()["error"].as_str().unwrap().len() <= HISTORY_ERROR_CHARS + 3);
+        let bytes = serde_json::to_vec(&json!({ "attempts": h })).unwrap().len();
+        assert!(bytes < 12_000, "{bytes} bytes");
+        // The next attempt folds into the same summary.
+        h.push(attempt(4_001, "failed"));
+        compact_history(&mut h, "order_place");
+        assert_eq!(h.len(), HISTORY_KEEP + 1);
+        assert_eq!(h[0]["count"], 4_001 - HISTORY_KEEP as u64);
+        assert_eq!(trailing_failures(&h), HISTORY_KEEP);
+    }
+
+    #[test]
+    fn trades_keep_every_record_so_compensation_reads_the_same() {
+        let mut h: Vec<Value> = (1..=40).map(|n| attempt(n, if n == 7 { "unknown" } else { "failed" })).collect();
+        let before = may_compensate(&h, 1_000_000);
+        compact_history(&mut h, "trade");
+        assert_eq!(h.len(), 40);
+        assert_eq!(may_compensate(&h, 1_000_000), before);
+        assert_eq!(may_compensate(&h, 1_010), may_compensate(&(1..=40).map(|n| attempt(n, if n == 7 { "unknown" } else { "failed" })).collect::<Vec<_>>(), 1_010));
+        assert!(h.iter().take(37).all(|a| a.get("error").is_none()));
+    }
+
+    #[test]
+    fn trailing_failures_stop_at_the_first_other_outcome() {
+        let h = vec![attempt(1, "failed"), attempt(2, "unknown"), attempt(3, "failed"), attempt(4, "failed")];
+        assert_eq!(trailing_failures(&h), 2);
     }
 }

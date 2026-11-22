@@ -161,6 +161,17 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // A database the deployment moved away from is marked retired (a `_cz_retired` table
+    // written at cutover). Refuse it outright, before migrating or taking the world lock:
+    // otherwise an API pointed at it by mistake would run the world and the settlement
+    // queue on a stale copy while the live database does the same, and the chain would
+    // see both.
+    let retired: Option<(String,)> = sqlx::query_as("SELECT to_regclass('public._cz_retired')::text").fetch_one(&db).await.ok().and_then(|(t,): (Option<String>,)| t.map(|t| (t,)));
+    if retired.is_some() {
+        let note: Option<(String,)> = sqlx::query_as("SELECT note FROM _cz_retired ORDER BY retired_at DESC LIMIT 1").fetch_optional(&db).await.unwrap_or(None);
+        anyhow::bail!("this database was retired ({}); DATABASE_URL must point at the live database", note.map(|n| n.0).unwrap_or_default());
+    }
+
     // Apply pending migrations before serving; a failure aborts boot on purpose.
     migrate::run(&db).await?;
 

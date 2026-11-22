@@ -118,7 +118,11 @@ pub fn order_lines(w: &World) -> Vec<RadioLine> {
 /// How long one read of recent decisions serves every caller (each open game tab polls
 /// `/radio`, and the voice warm-up loop reads it too). Decisions arrive once a game hour.
 const DECISIONS_TTL: std::time::Duration = std::time::Duration::from_secs(10);
-type Cached = Option<(std::time::Instant, Vec<RadioLine>)>;
+/// Decisions the radio keeps (the newest).
+const DECISIONS_KEPT: usize = 60;
+type Row = (i64, i64, String, Value);
+/// When it was refreshed, and the newest accepted decisions (seq descending).
+type Cached = Option<(std::time::Instant, Vec<Row>)>;
 fn decisions_cache() -> &'static tokio::sync::Mutex<Cached> {
     static C: std::sync::OnceLock<tokio::sync::Mutex<Cached>> = std::sync::OnceLock::new();
     C.get_or_init(|| tokio::sync::Mutex::new(None))
@@ -126,24 +130,34 @@ fn decisions_cache() -> &'static tokio::sync::Mutex<Cached> {
 
 /// Recent accepted decisions as radio, from the database (outside any world lock). One
 /// query per `DECISIONS_TTL` however many ask: callers queue on the cache's lock, so a
-/// burst shares a single read (served by idx_world_events_accepted_decisions).
+/// burst shares a single read (served by idx_world_events_accepted_decisions). After
+/// the first read only decisions newer than the cached ones are fetched: re-reading all
+/// 60 every 10 s was the largest steady read the API made (~1.7 M rows in 8 days).
 pub async fn decision_lines(db: &PgPool) -> Vec<RadioLine> {
     let mut cache = decisions_cache().lock().await;
-    if let Some((at, lines)) = cache.as_ref() {
-        if at.elapsed() < DECISIONS_TTL { return lines.clone(); }
+    if let Some((at, rows)) = cache.as_ref() {
+        if at.elapsed() < DECISIONS_TTL { return lines_of(rows); }
     }
-    let rows: Result<Vec<(i64, i64, String, Value)>, _> = sqlx::query_as(
-        "SELECT seq, tick, source, payload FROM world_events WHERE kind = 'agent_decision' AND payload->>'validation' = 'accepted' ORDER BY seq DESC LIMIT 60",
-    ).fetch_all(db).await;
-    match rows {
-        Ok(rows) => {
-            let lines: Vec<RadioLine> = rows.iter().filter_map(|(s, t, src, p)| from_decision(*s, *t, src, p)).collect();
-            *cache = Some((std::time::Instant::now(), lines.clone()));
+    let newest = cache.as_ref().and_then(|(_, r)| r.first().map(|x| x.0)).unwrap_or(0);
+    let fresh: Result<Vec<Row>, _> = sqlx::query_as(
+        "SELECT seq, tick, source, payload FROM world_events WHERE kind = 'agent_decision' AND payload->>'validation' = 'accepted' AND seq > $1 ORDER BY seq DESC LIMIT 60",
+    ).bind(newest).fetch_all(db).await;
+    match fresh {
+        Ok(fresh) => {
+            let mut rows = fresh;
+            if let Some((_, old)) = cache.take() { rows.extend(old); }
+            rows.truncate(DECISIONS_KEPT);
+            let lines = lines_of(&rows);
+            *cache = Some((std::time::Instant::now(), rows));
             lines
         }
         // A failed read is not cached; the last good lines are better than none.
-        Err(_) => cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default(),
+        Err(_) => cache.as_ref().map(|(_, r)| lines_of(r)).unwrap_or_default(),
     }
+}
+
+fn lines_of(rows: &[Row]) -> Vec<RadioLine> {
+    rows.iter().filter_map(|(s, t, src, p)| from_decision(*s, *t, src, p)).collect()
 }
 
 /// The latest `limit` lines, oldest first.

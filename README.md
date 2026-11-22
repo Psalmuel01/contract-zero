@@ -1,10 +1,10 @@
 <div align="center">
 
-[![CONTRACT ZERO: Cinder Yard at dusk, an in-game capture](docs/media/cover.jpg)](https://contract-zero.vercel.app)
+[![CONTRACT ZERO: Cinder Yard at dusk, an in-game capture](docs/media/cover.jpg)](https://contractzero.netlify.app)
 
 ### A tactical extraction shooter where every raid changes the war.
 
-**[▶ Play now](https://contract-zero.vercel.app)** · **[Watch demo video](https://youtu.be/UXW9PAMiNAA)** · **[Verify it on NEAR](#one-real-raid-end-to-end)** · **[Source](https://github.com/Psalmuel01/contract-zero)**
+**[▶ Play now](https://contractzero.netlify.app)** · **[Watch demo video](https://youtu.be/UXW9PAMiNAA)** · **[Verify it on NEAR](#one-real-raid-end-to-end)** · **[Source](https://github.com/Psalmuel01/contract-zero)**
 
 NEAR Hackathon, November 2026 · Track: **Games With Real Economies** · NEAR testnet
 
@@ -17,7 +17,7 @@ NEAR Hackathon, November 2026 · Track: **Games With Real Economies** · NEAR te
 
 ## Start playing
 
-1. **[Open the game](https://contract-zero.vercel.app)** and choose **Start training**. No account is needed; training is unscored and stays off chain.
+1. **[Open the game](https://contractzero.netlify.app)** and choose **Start training**. No account is needed; training is unscored and stays off chain.
 2. Start with **Training → Practice → Dustline Depot → Day → Raid → L1**.
 3. For live contracts, **sign in and choose a callsign**, then open **Contracts → View intel → Accept → Choose loadout → Deploy**.
 4. Take cargo, plant sabotage charges, or recover a seized case. Hold **E** to interact. For extraction, hold **E** in the zone and remain there for the eight-second countdown.
@@ -162,7 +162,7 @@ Browser, database, reliability, and live-chain checks have additional prerequisi
 | Area | Documented project status |
 |---|---|
 | Gameplay and economy | Three sites, three operation types, autonomous factions/merchants, and supply competition implemented |
-| Hosting | Web on Vercel; API and voice on Railway; database on Supabase; assets settle on NEAR testnet |
+| Hosting | Web on Netlify; API and voice on Railway; database on Neon; assets settle on NEAR testnet |
 | Sign-in | Email login through Privy is verified. NEAR testnet wallet login is also available. NEAR Auth social login on the deployed domain awaits dedicated credentials. [Details](docs/contract-zero/AUTH.md) |
 | AI and voices | Strategic planning and mission dialogue integrated; call caps, validation, authored text, and subtitle fallbacks apply |
 | Settlement | Queued; results remain pending until transactions are FINAL |
