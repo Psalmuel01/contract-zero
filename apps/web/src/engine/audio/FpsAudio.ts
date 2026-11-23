@@ -506,7 +506,7 @@ export class FpsAudio {
   }
 
   // ── A round landing: spatialised at its world point (flesh vs wall) ──
-  impact(kind: 'flesh' | 'wall', at: [number, number, number]): void {
+  impact(kind: 'flesh' | 'wall', at: [number, number, number], surface: 'metal' | 'concrete' | 'wood' | 'dirt' = 'metal'): void {
     if (!this.allow('impact', 'combat', 40, 400)) return;
     const ctx = this.ctx;
     if (!ctx) return;
@@ -544,13 +544,23 @@ export class FpsAudio {
       slap.start(now);
       slap.stop(now + 0.06);
     } else if (this.wall) {
-      // real bullet-on-metal impact, spatialised through g
+      // The recorded bullet-on-metal strike, voiced for what was hit: steel rings at
+      // pitch; concrete is the same crack lower and duller; timber duller still; earth
+      // is a thud with the ring filtered out. Only hard surfaces ricochet.
+      const VOICE = { metal: [1, 18000, 1], concrete: [0.82, 3600, 0.85], wood: [0.7, 2200, 0.8], dirt: [0.55, 900, 0.75] } as const;
+      const [rate, cut, level] = VOICE[surface];
       const src = ctx.createBufferSource();
       src.buffer = this.wall;
-      src.playbackRate.value = 0.95 + Math.random() * 0.12;
-      src.connect(g);
+      src.playbackRate.value = rate * (0.95 + Math.random() * 0.12);
+      const tone = ctx.createBiquadFilter();
+      tone.type = 'lowpass';
+      tone.frequency.value = cut;
+      const lg = ctx.createGain();
+      lg.gain.value = level;
+      src.connect(tone).connect(lg).connect(g);
       src.start(now);
-      if (Math.random() < 0.28 && this.allow('ricochet', 'combat', 35, 350)) this.ricochet(g, now);
+      const ricochetOdds = surface === 'metal' ? 0.32 : surface === 'concrete' ? 0.14 : 0;
+      if (Math.random() < ricochetOdds && this.allow('ricochet', 'combat', 35, 350)) this.ricochet(g, now);
     } else {
       // synth fallback until the impact sample decodes
       const tick = ctx.createBufferSource();

@@ -6,6 +6,7 @@ import { useGLTF } from '@react-three/drei';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import * as THREE from 'three';
 import { FPS_TUNING } from '../fps';
+import { rigClipName } from './rigClips';
 import { useRiflePrototype, cloneRifle } from './rifle';
 
 /** Melee props baked into the placeholder body. A shooter carries none of these. */
@@ -46,6 +47,8 @@ export interface OperatorApi {
   setClip(name: ClipName): void;
   /** Fire a one-shot clip over the top (returns to the looping clip after). */
   playOnce(name: ClipName, timeScale?: number): void;
+  /** Playback rate of the current looping clip, so footfalls keep pace with the ground. */
+  setRate(rate: number): void;
   /** Emissive tint: the aim telegraph (amber) and the hit flash (red). */
   setTint(hex: number, intensity: number): void;
   /** Diagnostics: where did the rifle actually end up? */
@@ -135,8 +138,11 @@ export const OperatorRig = forwardRef<OperatorApi, { modelPath: string }>(functi
         const c = m.clone() as THREE.MeshStandardMaterial;
         if (c.emissive) { c.emissive.setHex(0x000000); c.emissiveIntensity = 0; }
         // Without the amber tell, enemies must read on silhouette + light alone.
-        if (c.color) c.color.multiplyScalar(1.7);
-        c.roughness = Math.min(1, (c.roughness ?? 0.8) + 0.1);
+        // 1.7 was tuned against the old flat grade and read as plastic once the key
+        // light and exposure carried the scene; 1.35 keeps them visible at night
+        // without washing the fabric out by day.
+        if (c.color) c.color.multiplyScalar(1.35);
+        c.roughness = Math.min(1, (c.roughness ?? 0.8) + 0.18);
         mats.current.push(c);
         return c;
       };
@@ -195,7 +201,7 @@ export const OperatorRig = forwardRef<OperatorApi, { modelPath: string }>(functi
     const mixer = new THREE.AnimationMixer(rig);
     mixerRef.current = mixer;
     for (const clip of animations) {
-      const name = clip.name as ClipName;
+      const name = rigClipName(clip.name);
       const action = mixer.clipAction(clip);
       actions.current[name] = action;
     }
@@ -237,6 +243,11 @@ export const OperatorRig = forwardRef<OperatorApi, { modelPath: string }>(functi
       a.timeScale = timeScale;
       a.play();
       oneShot.current = a;
+    },
+    setRate(rate) {
+      if (dead.current || !current.current) return;
+      const a = actions.current[current.current];
+      if (a) a.timeScale = rate;
     },
     setTint(hex, intensity) {
       for (const m of mats.current) {

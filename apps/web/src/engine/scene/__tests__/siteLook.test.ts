@@ -74,15 +74,22 @@ describe('site look', () => {
     }
   })
 
-  it('grades the hour toward the site without touching how bright it is', () => {
+  it('grades the hour toward the site and shapes its light: a stronger key over a quieter ambient by day', () => {
     const day = ZONE_THEMES.DUSTLINE
     const a = gradeTheme(day, 'dustline_depot', 'day'), b = gradeTheme(day, 'blacksite', 'day'), c = gradeTheme(day, 'cinder_yard', 'day')
     expect(new Set([a.fog[0], b.fog[0], c.fog[0]]).size).toBe(3) // three different airs under one sun
     for (const g of [a, b, c]) {
-      expect(g.sun).toEqual(day.sun)
-      expect(g.ambient).toBe(day.ambient)
+      expect(g.sun.color).toBe(day.sun.color)
+      expect(g.sun.intensity).toBeGreaterThan(day.sun.intensity)   // the key carries the day
+      expect(g.ambient).toBeLessThan(day.ambient)                   // the flat fill steps back
+      expect(g.hemi[2]).toBeLessThan(day.hemi[2])
+      expect(g.exposure).toBeGreaterThan(0.9)
       expect(g.fog[2]).toBeLessThanOrEqual(day.fog[2])
     }
+    // Night keeps its key and holds the ambient up so the dark still reads.
+    const night = gradeTheme(ZONE_THEMES.BLACKSITE, 'blacksite', 'night')
+    expect(night.ambient).toBeGreaterThan(ZONE_THEMES.BLACKSITE.ambient * 0.7)
+    expect(night.exposure).toBeGreaterThan(1)
   })
 
   it('mixes colours linearly', () => {

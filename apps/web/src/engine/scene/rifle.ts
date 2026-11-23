@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useGLTF } from '@react-three/drei';
 import * as THREE from 'three';
+import { finishWeapon } from './weaponFinish';
 
 /**
  * The one rifle, shared by the first-person viewmodel and every enemy's hands.
@@ -51,6 +52,9 @@ function buildPrototype(src: THREE.Object3D): THREE.Group {
     const m = o as THREE.Mesh;
     if (m.isMesh) { m.castShadow = true; m.frustumCulled = false; }
   });
+  // The same surface pass the player's weapons get (edge wear, grain, a matte
+  // finish), so an enemy's rifle isn't a flat-colour toy next to everything else.
+  finishWeapon(inner);
 
   const group = new THREE.Group();
   group.add(inner);

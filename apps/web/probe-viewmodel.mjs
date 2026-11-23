@@ -39,6 +39,10 @@ const shot = (page, name) => page.screenshot({ path: `${out}/${site}-${phase}-${
   await page.evaluate(() => window.__czAds?.(true)); await page.waitForTimeout(1500)
   await shot(page, 'ads')
   await page.evaluate(() => window.__czAds?.(false)); await page.waitForTimeout(800)
+  // Mid-burst: the flash card, the smoke, a casing in the air and the kick on the weapon.
+  await page.evaluate(() => window.__czFire(true)); await page.waitForTimeout(140); await shot(page, 'firing')
+  await page.waitForTimeout(90); await shot(page, 'firing-2'); await page.evaluate(() => window.__czFire(false))
+  await page.waitForTimeout(600)
   // Spend a few rounds so a reload is allowed, then catch it part way through.
   await page.evaluate(() => window.__czFire(true)); await page.waitForTimeout(700); await page.evaluate(() => window.__czFire(false))
   await page.waitForTimeout(400)
