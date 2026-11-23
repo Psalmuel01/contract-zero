@@ -1167,6 +1167,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
   const enemyDrops = useRef(new Map<string, DroppedWeapon>());
   const extractedLabel = useRef('');
   const lastReinforceAt = useRef(0);    // sim-time of the last reinforcement drop
+  const reinforceLeft = useRef(mission.reinforceCap ?? Infinity); // this run's remaining reinforcements
   const hostageRef = useRef<THREE.Group>(null);
   // ── Survival wave state ──
   const survInit = useRef(false);
@@ -2824,12 +2825,16 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
       } else if (obj.kind === 'secure' || obj.kind === 'plant' || obj.kind === 'retrieve' || obj.kind === 'extract') {
         // The physical objectives: the field runtime says what has actually been done.
         const near = Math.hypot(pos.current.x - obj.pos[0], pos.current.z - obj.pos[1]) < HOLD_RADIUS;
+        // Reinforcements come while you are actually LOADING (E held on a case, a charge,
+        // the seized case) or holding the extraction, not merely while you stand near the
+        // cargo: fighting the yard guards beside it used to feed an endless stream.
+        const loading = FIELD.hold > 0 && (FIELD.target?.kind === 'cargo_case' || FIELD.target?.kind === 'seized_case' || FIELD.target?.kind === 'charge');
         const working = obj.kind === 'extract' ? FIELD.exfilPhase === 'counting'
-          : obj.kind === 'secure' ? near && FIELD.carried.length < FIELD.cases.length
-          : near;
-        if (working && (obj.reinforceCount ?? 0) > 0 && sim.time - lastReinforceAt.current > (obj.reinforceEvery ?? 3.5)) {
+          : obj.kind === 'secure' ? near && loading && FIELD.carried.length < FIELD.cases.length
+          : near && loading;
+        if (working && (obj.reinforceCount ?? 0) > 0 && reinforceLeft.current > 0 && sim.time - lastReinforceAt.current > (obj.reinforceEvery ?? 3.5)) {
           lastReinforceAt.current = sim.time;
-          reinforced(sim.reinforce(obj.reinforceRoom ?? obj.room ?? 0, obj.reinforceCount ?? 2));
+          reinforced(sim.reinforce(obj.reinforceRoom ?? obj.room ?? 0, Math.min(obj.reinforceCount ?? 2, reinforceLeft.current)));
         }
         if (obj.kind === 'secure') done = FIELD.carried.length >= Math.min(FIELD.cases.length, CARRY_MAX) || FIELD.exfilPhase === 'counting' || FIELD.exfilPhase === 'done';
         else if (obj.kind === 'plant') done = FIELD.planted.includes(obj.item ?? '');
@@ -3015,7 +3020,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
         }
         say('detonation');
         toast('THE LINE IS BURNING', '#ff8a5a');
-        reinforced(sim.reinforce(2, 2));
+        reinforced(sim.reinforce(2, Math.min(2, reinforceLeft.current)));
         break;
       case 'extractCalled':
         say('extractCalled');
@@ -3641,6 +3646,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
 
   /** Guards really arrived: say so once per wave, with the number the sim spawned. */
   function reinforced(spawned: number) {
+    reinforceLeft.current -= spawned;
     if (spawned > 0) sayAgain('reinforcements', 25, reinforcementLine(spawned));
   }
 
@@ -3698,6 +3704,7 @@ function FpsWorld({ hud, controls, audio, lowSpec, lightFx, minimal, mission, on
     sim.setAllActive(false);
     objective.current = 0;
     holdProgress.current = 0; lastReinforceAt.current = 0;
+    reinforceLeft.current = mission.reinforceCap ?? Infinity; // a restart gets the full budget again
     briefingUntil.current = sim.time + 3.5;
     completeAt.current = -99;
     advanced.current = false;

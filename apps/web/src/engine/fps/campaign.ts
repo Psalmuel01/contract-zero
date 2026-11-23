@@ -56,6 +56,8 @@ export interface Mission {
   cover: CoverBox[];
   enemies: EnemySpec[];
   objectives: Objective[];
+  /** Most reinforcements this run may bring in, all drops together (absent: no cap). */
+  reinforceCap?: number;
   hostage?: [number, number]; // a rescue op's VIP start point
   blackout?: boolean;  // the Rift with NVG jammed — you fight by muzzle-flash
   boss?: boolean;
