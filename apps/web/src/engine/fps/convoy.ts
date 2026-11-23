@@ -210,7 +210,9 @@ function setting(c: ConvoyContract): Setting {
     theme: PHASE_THEME[cond.phase],
     place: c.site?.name ?? (layout === 'blacksite' ? 'Blacksite' : 'Dustline Depot'),
     label: RESOURCE_LABEL[c.cargo.resource],
-    reinforceEvery: +(esc.reinforceEvery * cond.reinforce_bp / 10_000).toFixed(2),
+    // No faster than one drop every 5 s, whatever the posture: at 2.5 s a player loading
+    // cargo faced a new guard before the last one was down.
+    reinforceEvery: Math.max(5, +(esc.reinforceEvery * cond.reinforce_bp / 10_000).toFixed(2)),
   };
 }
 
@@ -233,6 +235,10 @@ function shell(c: ConvoyContract, st: Setting, gun: GunId, kind: OpKind) {
     zone: st.theme,
     level: st.lv.id,
     cues: c.cues,
+    // Reinforcements per run, all drops together: 2 at L1 … 6 at L5. Uncapped, a player
+    // fighting near the cargo faced a guard every few seconds for as long as it lasted
+    // (raids: 1 extraction in 37 runs by real players, Nov 2026).
+    reinforceCap: 1 + clampDefense(c.defense),
     gun,
     start: st.lv.start,
     walls: [...st.lv.walls],

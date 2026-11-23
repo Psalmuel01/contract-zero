@@ -544,11 +544,18 @@ pub fn may_compensate(attempts: &[Value], now_unix: i64) -> bool {
 /// only taken if nobody holds a live lease on it. A second worker blocks on the lock,
 /// then sees the lease and backs off, so it never jumps ahead to a later row.
 ///
+/// Player payouts (raids and operations) go first: a player who extracted should see it
+/// land on chain in seconds, not behind hours of agent order bookkeeping (after the
+/// Nov 2026 outage that backlog was ~15,800 rows, days of settling). They move existing
+/// tokens, mint nothing, and the chain checks balances; a payout that does arrive
+/// before the step that funds it is refused for balance, waits briefly (`balance`
+/// below) and lets the rows behind it through. Among themselves, and among the agents'
+/// rows, order is strict.
+///
 /// One exception keeps players from waiting on agent bookkeeping: a batch the ledger
 /// refused for its epoch issuance budget is deferred until the epoch resets. While it
-/// waits, player raid and operation payouts behind it may settle (they move existing
-/// tokens, mint nothing, and the chain checks balances), but agent trades and later
-/// flows stay in order behind it.
+/// waits, player raid and operation payouts behind it may settle, but agent trades
+/// and later flows stay in order behind it.
 pub async fn claim(db: &sqlx::PgPool, contract: &str, worker: &str) -> Result<Option<Row>, sqlx::Error> {
     sqlx::query_as(
         "WITH blocked AS (
@@ -560,7 +567,7 @@ pub async fn claim(db: &sqlx::PgPool, contract: &str, worker: &str) -> Result<Op
              WHERE s.contract = $1 AND s.status IN ('pending', 'submitted')
                AND NOT coalesce(s.defer_reason IN ('issuance_budget', 'balance', 'stuck') AND s.next_attempt_at > now(), false)
                AND (b.id IS NULL OR s.id < b.id OR s.kind IN ('raid', 'operation'))
-             ORDER BY (s.kind <> 'genesis'), s.id
+             ORDER BY (s.kind <> 'genesis'), (s.kind NOT IN ('raid', 'operation')), s.id
              LIMIT 1
              FOR UPDATE OF s
          )
@@ -1067,7 +1074,7 @@ mod tests {
     async fn two_workers_never_claim_the_same_row_or_jump_the_queue() {
         let Some(db) = test_db().await else { return };
         let contract = format!("test-claim-{}", uuid::Uuid::new_v4());
-        let ids = seed(&db, &contract, &[("flows", "f1"), ("trade", "t2"), ("raid", "r3")]).await;
+        let ids = seed(&db, &contract, &[("flows", "f1"), ("trade", "t2"), ("flows", "f3")]).await;
         let (a, b) = tokio::join!(claim(&db, &contract, "worker-a"), claim(&db, &contract, "worker-b"));
         let got: Vec<i64> = [a.unwrap(), b.unwrap()].into_iter().flatten().map(|r| r.0).collect();
         // Exactly one worker holds the head; the other gets nothing (it doesn't skip ahead).
@@ -1078,6 +1085,21 @@ mod tests {
         sqlx::query("UPDATE settlements SET lease_until = now() - interval '1 second' WHERE id = $1").bind(ids[0]).execute(&db).await.unwrap();
         let r = claim(&db, &contract, "worker-b").await.unwrap().unwrap();
         assert_eq!((r.0, r.4), (ids[0], 1)); // attempts counts the earlier claim
+        sqlx::query("DELETE FROM settlements WHERE contract = $1").bind(&contract).execute(&db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn player_payouts_settle_ahead_of_agent_bookkeeping() {
+        let Some(db) = test_db().await else { return };
+        let contract = format!("test-payout-{}", uuid::Uuid::new_v4());
+        let ids = seed(&db, &contract, &[("flows", "f1"), ("order_propose", "p2"), ("raid", "r3"), ("order_fill", "o4"), ("operation", "op5")]).await;
+        let mut order = vec![];
+        while let Some(r) = claim(&db, &contract, "w").await.unwrap() {
+            order.push(r.0);
+            sqlx::query("UPDATE settlements SET status = 'confirmed' WHERE id = $1").bind(r.0).execute(&db).await.unwrap();
+        }
+        // Payouts first, in their own order; then the agents' rows, in theirs.
+        assert_eq!(order, vec![ids[2], ids[4], ids[0], ids[1], ids[3]]);
         sqlx::query("DELETE FROM settlements WHERE contract = $1").bind(&contract).execute(&db).await.unwrap();
     }
 

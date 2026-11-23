@@ -776,6 +776,17 @@ describe('FpsSim defend reinforcements', () => {
     expect(sim.getEnemies().filter((e) => e.room === 1).every((e) => e.alive)).toBe(true);
   });
 
+  it('reinforce brings back the post farthest from the player first', () => {
+    const sim = defendSim();
+    for (const e of sim.getEnemies()) if (e.room === 2) { e.alive = false; e.hp = 0; }
+    // Stand beside the x = +2 post: the one at x = -2 is the farther, so it comes back.
+    sim.step(0.016, input({ firing: false, origin: [2, 1.6, -9] }));
+    expect(sim.reinforce(2, 1)).toBe(1);
+    const back = sim.getEnemies().filter((e) => e.room === 2 && e.alive);
+    expect(back).toHaveLength(1);
+    expect(back[0].x).toBeLessThan(0);
+  });
+
   it('reinforce leaves a still-living room alone (nothing to revive)', () => {
     const sim = defendSim();
     expect(sim.reinforce(2, 5)).toBe(0);

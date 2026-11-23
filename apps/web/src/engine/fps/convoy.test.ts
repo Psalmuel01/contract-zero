@@ -127,7 +127,15 @@ describe('convoy mission from the server guard plan', () => {
   it('sends no reinforcements when the faction has no medicine', () => {
     const load = buildConvoyMission({ ...base, guards: plan }).objectives[3];
     expect(load.reinforceCount).toBe(0);
-    expect(load.reinforceEvery).toBe(3.7);
+    expect(load.reinforceEvery).toBe(5); // the plan's 3.7 s, raised to the 5 s floor
+  });
+
+  it('caps reinforcements per run by defense and never drops faster than every 5 s', () => {
+    for (const defense of [1, 3, 5]) {
+      const m = buildConvoyMission({ ...base, defense });
+      expect(m.reinforceCap).toBe(1 + defense);
+      for (const o of m.objectives) if (o.reinforceEvery !== undefined) expect(o.reinforceEvery).toBeGreaterThanOrEqual(5);
+    }
   });
 
   it('can field no guards at all when the faction has no ammunition', () => {

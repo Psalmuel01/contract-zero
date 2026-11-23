@@ -292,9 +292,9 @@ export const FPS_TUNING = {
   // MERCY_MS of invulnerability so you're never chain-melted.
   ENEMY: {
     EYE_Y: 1.5,
-    MAX_ATTACKERS: 3,     // aggression-token budget (the GoW fairness rule) — livelier
+    MAX_ATTACKERS: 2,     // aggression-token budget (the GoW fairness rule); 3 had real players dying in ~85% of runs
     ENGAGE_RANGE: 30,     // won't shoot from further than this
-    AIM_MS: 0.6,          // telegraph before the shot — the reaction window
+    AIM_MS: 0.8,          // telegraph before the shot — the reaction window (0.6 was too short to react to)
     RECOVER_MS: 0.6,      // ducked cooldown after firing
     HIDE_MS: 0.7,         // min time hidden before peeking again
     // Spread of the FIRST peek after a room is breached. Wider than HIDE_MS on
@@ -319,10 +319,10 @@ export const FPS_TUNING = {
     // Scatter around that last-known point while searching, so a squad that lost you
     // fans out over the spot rather than stacking on one coordinate.
     SEARCH_SPREAD: 2.6,
-    BASE_ACC: 0.45,       // point-blank hit chance
+    BASE_ACC: 0.38,       // point-blank hit chance
     NEAR: 6, FAR: 26,     // accuracy falls off linearly across this range
-    DMG: 10,              // damage per hit
-    MERCY_MS: 0.6,        // post-hit invulnerability
+    DMG: 8,               // damage per hit (about 13 hits to drop you)
+    MERCY_MS: 0.8,        // post-hit invulnerability
     MOVE_SPEED: 2.8,      // m/s when maneuvering
     BODY_R: 0.55,         // shoulders + rifle: keep them clear of walls, not touching
     WORLD_CLAMP: 18,      // outer safety; walls do the real containment (layouts vary in depth)
@@ -499,9 +499,14 @@ export class FpsSim {
    *  spawns and wake them, so a held point keeps getting tested. Returns how many. */
   reinforce(room: number, count: number, hpMult = 1): number {
     let n = 0;
-    for (let i = 0; i < this.enemies.length && n < count; i++) {
+    // Farthest posts first: a reinforcement should arrive from the far side of the
+    // room and have to cross it, not stand up beside the player.
+    const order = this.enemies.map((_, i) => i)
+      .filter((i) => !this.enemies[i].alive && this.enemies[i].room === room)
+      .sort((a, b) => Math.hypot(this.spawns[b][0] - this.playerX, this.spawns[b][1] - this.playerZ) - Math.hypot(this.spawns[a][0] - this.playerX, this.spawns[a][1] - this.playerZ));
+    for (const i of order) {
+      if (n >= count) break;
       const e = this.enemies[i];
-      if (e.alive || e.room !== room) continue;
       const [sx, sz] = this.spawns[i];
       e.x = sx; e.z = sz;
       e.maxHp = Math.max(1, Math.round((e.boss ? e.maxHp : FPS_TUNING.DEFAULT_ENEMY_HP) * hpMult));
